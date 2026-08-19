@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="pos_opay_payment_attempt_view_list" model="ir.ui.view">
+        <field name="name">pos.opay.payment.attempt.list</field>
+        <field name="model">pos.opay.payment.attempt</field>
+        <field name="arch" type="xml">
+            <list string="OPay Payment Attempts" create="0" edit="0" delete="0">
+                <field name="create_date" string="Created"/>
+                <field name="status"/>
+                <field name="amount"/>
+                <field name="currency"/>
+                <field name="payment_reference" optional="show"/>
+                <field name="out_order_no" string="OPay Business Reference" optional="show"/>
+                <field name="order_no" string="OPay Order Number" optional="show"/>
+                <field name="payment_method_id" options="{'no_open': True}"/>
+                <field name="terminal_sn" string="Terminal SN"/>
+                <field name="pos_config_id" optional="hide" options="{'no_open': True}"/>
+                <field name="pos_session_id" optional="hide" options="{'no_open': True}"/>
+                <field name="company_id" groups="base.group_multi_company"/>
+                <field name="last_source" string="Source" optional="show"/>
+                <field name="expires_at" optional="hide"/>
+                <field name="finalized_at" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="pos_opay_payment_attempt_view_form" model="ir.ui.view">
+        <field name="name">pos.opay.payment.attempt.form</field>
+        <field name="model">pos.opay.payment.attempt</field>
+        <field name="arch" type="xml">
+            <form string="OPay Payment Attempt" create="0" edit="0" delete="0">
+                <sheet>
+                    <group>
+                        <group string="Payment">
+                            <field name="status"/>
+                            <field name="amount"/>
+                            <field name="currency"/>
+                            <field name="payment_method_id" options="{'no_open': True}"/>
+                            <field name="terminal_sn" string="Terminal SN"/>
+                            <field name="last_source" string="Source"/>
+                        </group>
+                        <group string="References">
+                            <field name="payment_reference"/>
+                            <field name="out_order_no" string="OPay Business Reference"/>
+                            <field name="order_no" string="OPay Order Number"/>
+                        </group>
+                    </group>
+                    <group>
+                        <group string="Point of Sale">
+                            <field name="pos_config_id" options="{'no_open': True}"/>
+                            <field name="pos_session_id" options="{'no_open': True}"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                        </group>
+                        <group string="Timing">
+                            <field name="create_date" string="Created"/>
+                            <field name="expires_at"/>
+                            <field name="finalized_at"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="pos_opay_payment_attempt_view_search" model="ir.ui.view">
+        <field name="name">pos.opay.payment.attempt.search</field>
+        <field name="model">pos.opay.payment.attempt</field>
+        <field name="arch" type="xml">
+            <search string="OPay Payment Attempts">
+                <field name="payment_reference"/>
+                <field name="out_order_no"/>
+                <field name="order_no"/>
+                <field name="payment_method_id"/>
+                <field name="terminal_sn"/>
+                <filter name="active" string="Active" domain="[('status', 'in', ['creating', 'waiting', 'uncertain', 'PENDING'])]"/>
+                <filter name="successful" string="Successful" domain="[('status', '=', 'SUCCESS')]"/>
+                <filter name="final_negative" string="Failed / Closed / Cancelled" domain="[('status', 'in', ['failed', 'FAIL', 'CLOSE', 'CANCEL'])]"/>
+                <group>
+                    <filter name="group_by_status" string="Status" domain="[]" context="{'group_by': 'status'}"/>
+                    <filter name="group_by_payment_method" string="Payment Method" domain="[]" context="{'group_by': 'payment_method_id'}"/>
+                    <filter name="group_by_pos_config" string="Point of Sale" domain="[]" context="{'group_by': 'pos_config_id'}"/>
+                    <filter name="group_by_company" string="Company" domain="[]" context="{'group_by': 'company_id'}" groups="base.group_multi_company"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_pos_opay_payment_attempt" model="ir.actions.act_window">
+        <field name="name">OPay Payment Attempts</field>
+        <field name="res_model">pos.opay.payment.attempt</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="pos_opay_payment_attempt_view_search"/>
+        <field name="context">{'search_default_group_by_status': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_empty_folder">No OPay payment attempts found.</p>
+        </field>
+    </record>
+
+    <menuitem
+        id="menu_pos_opay_payment_attempt"
+        name="OPay Payment Attempts"
+        parent="point_of_sale.menu_point_of_sale"
+        action="action_pos_opay_payment_attempt"
+        sequence="4"
+        groups="base.group_erp_manager"
+    />
+</odoo>

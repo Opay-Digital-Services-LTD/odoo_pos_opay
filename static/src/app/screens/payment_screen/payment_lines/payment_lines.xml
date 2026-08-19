@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+    <t t-inherit="point_of_sale.PaymentScreenPaymentLines" t-inherit-mode="extension">
+        <xpath expr="//t[@t-elif=&quot;line.payment_status == 'waitingCard'&quot;]/div[2]" position="inside">
+            <button
+                t-if="this.canCheckOpayStatus(line)"
+                type="button"
+                class="button o_pos_opay_check_status btn btn-secondary w-100 mt-2"
+                t-att-disabled="this.isOpayStatusCheckDisabled(line)"
+                t-on-click.stop="() => this.checkOpayPaymentStatus(line)"
+            >
+                <t t-if="this.isCheckingOpayStatus(line)">
+                    <i class="fa fa-circle-o-notch fa-spin me-2" role="img"/>
+                    Checking...
+                </t>
+                <t t-else="">Check Payment Status</t>
+            </button>
+        </xpath>
+    </t>
+</templates>

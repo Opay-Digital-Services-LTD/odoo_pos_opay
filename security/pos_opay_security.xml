@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="pos_opay_payment_attempt_company_rule" model="ir.rule">
+        <field name="name">OPay Payment Attempt multi-company</field>
+        <field name="model_id" ref="model_pos_opay_payment_attempt"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+</odoo>

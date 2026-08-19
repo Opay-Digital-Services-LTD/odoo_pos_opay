@@ -1,0 +1,596 @@
+import base64
+from datetime import timedelta
+from unittest.mock import Mock, patch
+from uuid import uuid4
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+from odoo import fields
+from odoo.addons.pos_opay.controllers.main import PosOpayController
+from odoo.addons.pos_opay.services.opay_api import OPayClient, OPayHTTPError
+from odoo.addons.pos_opay.services.opay_auth import OPayAuth, OPayConfigurationError
+from odoo.exceptions import ValidationError
+from odoo.tests.common import TransactionCase, tagged
+
+
+@tagged("post_install", "-at_install")
+class TestOPayPaymentAttempt(TransactionCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.opay_private_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=1024
+        )
+        cls.merchant_private_key = rsa.generate_private_key(
+            public_exponent=65537, key_size=1024
+        )
+        opay_public_key = cls.opay_private_key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        ).decode()
+        merchant_private_key = cls.merchant_private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode()
+        cls.payment_method = cls.env["pos.payment.method"].create(
+            {
+                "name": "OPay Phase 6 Terminal",
+                "payment_method_type": "terminal",
+                "use_payment_terminal": "opay",
+                "opay_head_merchant_id": "FAKE-HEAD-MERCHANT",
+                "opay_merchant_id": "FAKE-BRANCH-MERCHANT",
+                "opay_terminal_sn": "FAKE-PHASE6-TERMINAL",
+                "opay_client_auth_key": "FAKE-CLIENT-AUTH-KEY",
+                "opay_public_key": opay_public_key,
+                "opay_merchant_private_key": merchant_private_key,
+                "opay_sub_scene_enum": "FAKE-SUB-SCENE",
+            }
+        )
+        cls.config = cls.env["pos.config"].create(
+            {
+                "name": "OPay Phase 6 POS",
+                "payment_method_ids": [(6, 0, [cls.payment_method.id])],
+            }
+        )
+        cls.session = cls.env["pos.session"].create(
+            {
+                "name": "OPay Phase 6 Session",
+                "config_id": cls.config.id,
+                "user_id": cls.env.user.id,
+                "state": "opened",
+            }
+        )
+
+    def test_valid_authenticated_success_webhook_and_duplicate_are_idempotent(self):
+        attempt = self._attempt()
+        envelope, headers = self._webhook(attempt, "SUCCESS")
+
+        with patch.object(type(self.config), "_notify", autospec=True) as notify:
+            processed = self.env[
+                "pos.opay.payment.attempt"
+            ].process_webhook_notification(
+                headers, envelope, now_ms="1700000000000"
+            )
+            duplicate = self.env[
+                "pos.opay.payment.attempt"
+            ].process_webhook_notification(
+                headers, envelope, now_ms="1700000000000"
+            )
+
+        self.assertEqual(processed, attempt)
+        self.assertEqual(duplicate, attempt)
+        self.assertEqual(attempt.status, "SUCCESS")
+        self.assertTrue(attempt.finalized_at)
+        notify.assert_called_once()
+        notification = notify.call_args.args[2]
+        self.assertEqual(notification["reference"], attempt.payment_reference)
+        self.assertEqual(notification["out_order_no"], attempt.out_order_no)
+        self.assertEqual(notification["order_no"], attempt.order_no)
+        self.assertEqual(notification["status"], "SUCCESS")
+        self.assertTrue(notification["payment_completed"])
+
+    def test_webhook_controller_returns_documented_acknowledgement(self):
+        attempt = self._attempt()
+        envelope, headers = self._webhook(
+            attempt,
+            "SUCCESS",
+            timestamp=str(OPayAuth._timestamp_ms()),
+        )
+        fake_request = Mock()
+        fake_request.env = self.env
+        fake_request.get_json_data.return_value = envelope
+        fake_request.httprequest.headers = {
+            "merchantId": headers["merchant_id"],
+            "X-Opay-Tranid": headers["transaction_id"],
+        }
+        fake_request.make_json_response.side_effect = (
+            lambda payload, status=200: (payload, status)
+        )
+
+        with self.assertLogs(
+            "odoo.addons.pos_opay.controllers.main", level="INFO"
+        ) as logs, patch(
+            "odoo.addons.pos_opay.controllers.main.request", fake_request
+        ), patch.object(
+            PosOpayController, "_duration_ms", return_value=75
+        ):
+            response = PosOpayController.notification.original_endpoint(
+                PosOpayController()
+            )
+
+        self.assertEqual(
+            response,
+            ({"code": "00000", "message": "SUCCESSFUL"}, 200),
+        )
+        self.assertEqual(attempt.status, "SUCCESS")
+        log_message = logs.output[-1]
+        self.assertIn("event=opay_webhook_processing", log_message)
+        self.assertIn("outcome=processed", log_message)
+        self.assertIn("source=webhook", log_message)
+        self.assertIn(f"attempt_id={attempt.id}", log_message)
+        self.assertIn(f"reference={attempt.payment_reference}", log_message)
+        self.assertIn(f"out_order_no={attempt.out_order_no}", log_message)
+        self.assertIn(f"order_no={attempt.order_no}", log_message)
+        self.assertIn(f"terminal_sn={attempt.terminal_sn}", log_message)
+        self.assertIn("status=SUCCESS", log_message)
+        self.assertIn("duration_ms=75", log_message)
+        for forbidden_value in (
+            envelope["clientAuthKey"],
+            envelope["sign"],
+            envelope["paramContent"],
+            self.payment_method.opay_merchant_private_key,
+            self.payment_method.opay_public_key,
+        ):
+            self.assertNotIn(forbidden_value, log_message)
+
+    def test_webhook_controller_rejects_malformed_json(self):
+        fake_request = Mock()
+        fake_request.get_json_data.side_effect = ValueError("malformed JSON")
+        fake_request.make_json_response.side_effect = (
+            lambda payload, status=200: (payload, status)
+        )
+
+        with self.assertLogs(
+            "odoo.addons.pos_opay.controllers.main", level="WARNING"
+        ) as logs, patch(
+            "odoo.addons.pos_opay.controllers.main.request", fake_request
+        ):
+            response = PosOpayController.notification.original_endpoint(
+                PosOpayController()
+            )
+
+        self.assertEqual(
+            response,
+            ({"code": "00004", "message": "INVALID REQUEST"}, 400),
+        )
+        self.assertIn("reason=malformed_json", logs.output[0])
+        self.assertIn("duration_ms=", logs.output[0])
+
+    def test_webhook_unexpected_error_does_not_log_payload_or_exception_text(self):
+        fake_request = Mock()
+        fake_request.env = self.env
+        fake_request.get_json_data.return_value = {
+            "clientAuthKey": "CLIENT-AUTH-MUST-NOT-BE-LOGGED",
+            "sign": "SIGNATURE-MUST-NOT-BE-LOGGED",
+            "paramContent": "ENCRYPTED-PAYLOAD-MUST-NOT-BE-LOGGED",
+        }
+        fake_request.httprequest.headers = {}
+        fake_request.make_json_response.side_effect = (
+            lambda payload, status=200: (payload, status)
+        )
+        attempt_model = fake_request.env["pos.opay.payment.attempt"]
+
+        with self.assertLogs(
+            "odoo.addons.pos_opay.controllers.main", level="ERROR"
+        ) as logs, patch(
+            "odoo.addons.pos_opay.controllers.main.request", fake_request
+        ), patch.object(
+            type(attempt_model),
+            "process_webhook_notification",
+            side_effect=RuntimeError("DECRYPTED-PAYLOAD-MUST-NOT-BE-LOGGED"),
+        ):
+            response = PosOpayController.notification.original_endpoint(
+                PosOpayController()
+            )
+
+        self.assertEqual(
+            response,
+            ({"code": "11004", "message": "PROCESSING ERROR"}, 500),
+        )
+        log_message = logs.output[0]
+        self.assertIn("event=opay_webhook_processing", log_message)
+        self.assertIn("outcome=error", log_message)
+        self.assertIn("error_type=RuntimeError", log_message)
+        self.assertIn("duration_ms=", log_message)
+        for forbidden_value in (
+            "CLIENT-AUTH-MUST-NOT-BE-LOGGED",
+            "SIGNATURE-MUST-NOT-BE-LOGGED",
+            "ENCRYPTED-PAYLOAD-MUST-NOT-BE-LOGGED",
+            "DECRYPTED-PAYLOAD-MUST-NOT-BE-LOGGED",
+        ):
+            self.assertNotIn(forbidden_value, log_message)
+
+    def test_webhook_controller_logs_safe_specific_rejection_reason(self):
+        attempt = self._attempt()
+        envelope, headers = self._webhook(
+            attempt,
+            "SUCCESS",
+            result_overrides={"amount": "999.00"},
+            timestamp=str(OPayAuth._timestamp_ms()),
+        )
+        fake_request = Mock()
+        fake_request.env = self.env
+        fake_request.get_json_data.return_value = envelope
+        fake_request.httprequest.headers = {
+            "merchantId": headers["merchant_id"],
+            "X-Opay-Tranid": headers["transaction_id"],
+        }
+        fake_request.make_json_response.side_effect = (
+            lambda payload, status=200: (payload, status)
+        )
+
+        with self.assertLogs(
+            "odoo.addons.pos_opay.controllers.main", level="WARNING"
+        ) as logs, patch(
+            "odoo.addons.pos_opay.controllers.main.request", fake_request
+        ):
+            response = PosOpayController.notification.original_endpoint(
+                PosOpayController()
+            )
+
+        self.assertEqual(
+            response,
+            ({"code": "00004", "message": "INVALID REQUEST"}, 400),
+        )
+        log_message = logs.output[0]
+        self.assertIn("reason=amount_mismatch", log_message)
+        self.assertIn(f"attempt_id={attempt.id}", log_message)
+        self.assertIn(f"out_order_no={attempt.out_order_no}", log_message)
+        self.assertIn("duration_ms=", log_message)
+        self.assertNotIn("FAKE-CLIENT-AUTH-KEY", log_message)
+
+    def test_failure_close_and_cancel_release_terminal(self):
+        for status in ("FAIL", "CLOSE", "CANCEL"):
+            with self.subTest(status=status):
+                attempt = self._attempt()
+                envelope, headers = self._webhook(attempt, status)
+                self.env["pos.opay.payment.attempt"].process_webhook_notification(
+                    headers, envelope, now_ms="1700000000000"
+                )
+
+                self.assertEqual(attempt.status, status)
+                self.assertTrue(attempt.frontend_response()["terminal_released"])
+                self.assertFalse(attempt.frontend_response()["payment_completed"])
+
+    def test_webhook_rejects_invalid_signature_and_expired_timestamp(self):
+        attempt = self._attempt()
+        envelope, headers = self._webhook(attempt, "SUCCESS")
+        envelope["sign"] = base64.b64encode(b"invalid-signature").decode()
+
+        with self.assertRaises(ValidationError) as caught:
+            self.env["pos.opay.payment.attempt"].process_webhook_notification(
+                headers, envelope, now_ms="1700000000000"
+            )
+        self.assertEqual(
+            caught.exception.reason_code, "signature_verification_failure"
+        )
+
+        envelope, headers = self._webhook(attempt, "SUCCESS")
+        with self.assertRaises(ValidationError) as caught:
+            self.env["pos.opay.payment.attempt"].process_webhook_notification(
+                headers, envelope, now_ms="1700000300001"
+            )
+        self.assertEqual(caught.exception.reason_code, "expired_timestamp")
+        self.assertEqual(attempt.status, "waiting")
+
+    def test_webhook_reports_invalid_server_crypto_configuration(self):
+        attempt = self._attempt()
+        envelope, headers = self._webhook(attempt, "SUCCESS")
+
+        with patch(
+            "odoo.addons.pos_opay.models.opay_payment_attempt.OPayAuth",
+            side_effect=OPayConfigurationError("Invalid test key."),
+        ):
+            with self.assertRaises(ValidationError) as caught:
+                self.env[
+                    "pos.opay.payment.attempt"
+                ].process_webhook_notification(
+                    headers, envelope, now_ms="1700000000000"
+                )
+
+        self.assertEqual(
+            caught.exception.reason_code, "invalid_crypto_configuration"
+        )
+        self.assertEqual(attempt.status, "waiting")
+
+    def test_webhook_rejects_every_correlation_mismatch(self):
+        mismatches = {
+            "unknown_merchant": (
+                {},
+                {"merchant_id": "WRONG-BRANCH"},
+                "unknown_merchant",
+            ),
+            "amount": ({"amount": "999.00"}, {}, "amount_mismatch"),
+            "currency": ({"currency": "USD"}, {}, "currency_mismatch"),
+            "terminal": (
+                {"sn": "WRONG-TERMINAL"},
+                {},
+                "terminal_sn_mismatch",
+            ),
+            "out_order_no": (
+                {"outOrderNo": "WRONG-REFERENCE"},
+                {},
+                "out_order_no_mismatch",
+            ),
+            "order_no": (
+                {"orderNo": "WRONG-ORDER"},
+                {},
+                "order_no_mismatch",
+            ),
+            "status": ({"_webhook_status": "UNKNOWN"}, {}, "invalid_status"),
+            "merchant_body": (
+                {"merchantId": "WRONG-BRANCH"},
+                {},
+                "merchant_mismatch",
+            ),
+            "transaction_header": (
+                {},
+                {"transaction_id": "WRONG-TRANSACTION"},
+                "transaction_header_mismatch",
+            ),
+        }
+        for name, (
+            result_overrides,
+            header_overrides,
+            expected_reason,
+        ) in mismatches.items():
+            with self.subTest(name=name):
+                result_overrides = dict(result_overrides)
+                webhook_status = result_overrides.pop(
+                    "_webhook_status", "SUCCESS"
+                )
+                attempt = self._attempt()
+                envelope, headers = self._webhook(
+                    attempt,
+                    webhook_status,
+                    result_overrides=result_overrides,
+                )
+                headers.update(header_overrides)
+                with self.assertRaises(ValidationError) as caught:
+                    self.env[
+                        "pos.opay.payment.attempt"
+                    ].process_webhook_notification(
+                        headers, envelope, now_ms="1700000000000"
+                    )
+                self.assertEqual(caught.exception.reason_code, expected_reason)
+                self.assertEqual(attempt.status, "waiting")
+
+    def test_late_webhook_for_old_attempt_cannot_complete_new_attempt(self):
+        old_attempt = self._attempt(status="CLOSE")
+        new_attempt = self._attempt()
+        envelope, headers = self._webhook(old_attempt, "CLOSE")
+
+        self.env["pos.opay.payment.attempt"].process_webhook_notification(
+            headers, envelope, now_ms="1700000000000"
+        )
+
+        self.assertEqual(old_attempt.status, "CLOSE")
+        self.assertEqual(new_attempt.status, "waiting")
+
+    def test_query_pending_stays_active_and_success_completes_exact_attempt(self):
+        attempt = self._attempt(status="uncertain")
+        client = Mock(spec=OPayClient)
+        client.query_payment.return_value = self._result(attempt, "PENDING")
+
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            pending = attempt.query_opay_status(notify=False)
+            client.query_payment.return_value = self._result(attempt, "SUCCESS")
+            success = attempt.query_opay_status(notify=False)
+
+        self.assertEqual(pending["status"], "PENDING")
+        self.assertFalse(pending["terminal_released"])
+        self.assertEqual(success["status"], "SUCCESS")
+        self.assertTrue(success["payment_completed"])
+        self.assertEqual(client.query_payment.call_count, 2)
+
+    def test_query_technical_failure_preserves_authoritative_status(self):
+        attempt = self._attempt(status="PENDING")
+        client = Mock(spec=OPayClient)
+        client.query_payment.side_effect = OPayHTTPError(500)
+
+        with self.assertLogs(
+            "odoo.addons.pos_opay.models.opay_payment_attempt", level="WARNING"
+        ) as logs, patch.object(
+            OPayClient, "from_payment_method", return_value=client
+        ):
+            response = attempt.query_opay_status(
+                notify=False, reason="manual_check"
+            )
+
+        self.assertEqual(attempt.status, "PENDING")
+        self.assertEqual(response["status"], "PENDING")
+        self.assertTrue(response["ambiguous"])
+        self.assertFalse(response["payment_completed"])
+        client.query_payment.assert_called_once_with(
+            out_order_no=attempt.out_order_no,
+            order_no=attempt.order_no,
+        )
+        client.create_payment.assert_not_called()
+        self.assertIn("error_category=http_error", logs.output[0])
+
+    def test_query_and_finalization_logs_include_reason_duration_and_no_secrets(self):
+        attempt = self._attempt(status="uncertain")
+        client = Mock(spec=OPayClient)
+        client.query_payment.return_value = self._result(attempt, "PENDING")
+
+        with self.assertLogs(
+            "odoo.addons.pos_opay.models.opay_payment_attempt", level="INFO"
+        ) as logs, patch.object(
+            OPayClient, "from_payment_method", return_value=client
+        ), patch.object(
+            type(attempt), "_duration_ms", side_effect=[125, 10]
+        ):
+            attempt.query_opay_status(notify=False, reason="manual_check")
+
+        query_log = next(
+            message
+            for message in logs.output
+            if "event=opay_query_order_api" in message
+        )
+        finalization_log = next(
+            message
+            for message in logs.output
+            if "event=opay_attempt_finalization" in message
+        )
+        for log_message in (query_log, finalization_log):
+            self.assertIn("source=query", log_message)
+            self.assertIn("reason=manual_check", log_message)
+            self.assertIn(f"payment_method_id={self.payment_method.id}", log_message)
+            self.assertIn(f"attempt_id={attempt.id}", log_message)
+            self.assertIn(f"reference={attempt.payment_reference}", log_message)
+            self.assertIn(f"out_order_no={attempt.out_order_no}", log_message)
+            self.assertIn(f"order_no={attempt.order_no}", log_message)
+            self.assertIn(f"terminal_sn={attempt.terminal_sn}", log_message)
+            for secret in (
+                self.payment_method.opay_client_auth_key,
+                self.payment_method.opay_merchant_private_key,
+                self.payment_method.opay_public_key,
+            ):
+                self.assertNotIn(secret, log_message)
+        self.assertIn("outcome=authenticated", query_log)
+        self.assertIn("status=PENDING", query_log)
+        self.assertIn("duration_ms=125", query_log)
+        self.assertIn("outcome=applied", finalization_log)
+        self.assertIn("status=PENDING", finalization_log)
+        self.assertIn("duration_ms=10", finalization_log)
+
+    def test_expiry_does_not_query_or_release_terminal(self):
+        stale_attempt = self._attempt(
+            expires_at=fields.Datetime.now() - timedelta(seconds=1)
+        )
+        new_reference = str(uuid4())
+        client = Mock(spec=OPayClient)
+
+        with patch.object(
+            OPayClient, "from_payment_method", return_value=client
+        ) as client_factory:
+            response = self.payment_method.opay_create_payment_request(
+                {
+                    "reference": new_reference,
+                    "amount": 50,
+                    "session_id": self.session.id,
+                }
+            )
+
+        self.assertEqual(stale_attempt.status, "waiting")
+        self.assertEqual(response["status"], "failed")
+        self.assertIn("Check Payment Status", response["message"])
+        client_factory.assert_not_called()
+        client.query_payment.assert_not_called()
+        client.create_payment.assert_not_called()
+
+    def test_expired_uncertain_duplicate_does_not_query_or_create(self):
+        attempt = self._attempt(
+            status="uncertain",
+            expires_at=fields.Datetime.now() - timedelta(seconds=1),
+        )
+        client = Mock(spec=OPayClient)
+
+        with patch.object(
+            OPayClient, "from_payment_method", return_value=client
+        ) as client_factory:
+            response = self.payment_method.opay_create_payment_request(
+                {
+                    "reference": attempt.payment_reference,
+                    "amount": 100,
+                    "session_id": self.session.id,
+                }
+            )
+
+        self.assertEqual(response["status"], "uncertain")
+        self.assertTrue(response["reused"])
+        client_factory.assert_not_called()
+        client.query_payment.assert_not_called()
+        client.create_payment.assert_not_called()
+
+    def _attempt(self, status="waiting", expires_at=None):
+        reference = str(uuid4())
+        attempt_model = self.env["pos.opay.payment.attempt"]
+        attempt = attempt_model.create(
+            {
+                **attempt_model._new_attempt_values(
+                    self.payment_method,
+                    reference,
+                    reference.replace("-", "").upper(),
+                    "100.00",
+                    session=self.session,
+                ),
+                "order_no": f"OPAY-{reference[:8]}",
+                "status": status,
+                "expires_at": expires_at
+                or fields.Datetime.now() + timedelta(seconds=180),
+            }
+        )
+        return attempt
+
+    def _result(self, attempt, status, **overrides):
+        return {
+            "outOrderNo": attempt.out_order_no,
+            "orderNo": attempt.order_no,
+            "status": status,
+            "amount": attempt.amount,
+            "currency": attempt.currency,
+            "headMerchantId": attempt.head_merchant_id,
+            "merchantId": attempt.merchant_id,
+            "sn": attempt.terminal_sn,
+            **overrides,
+        }
+
+    def _webhook(
+        self,
+        attempt,
+        status,
+        result_overrides=None,
+        timestamp="1700000000000",
+    ):
+        result = self._result(attempt, status, **(result_overrides or {}))
+        content = {"data": result}
+        encrypted_content = self._encrypt_chunks(
+            OPayAuth.canonical_json(content).encode(),
+            self.merchant_private_key.public_key(),
+        )
+        signature = self.opay_private_key.sign(
+            f"{encrypted_content}{timestamp}".encode(),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+        return (
+            {
+                "clientAuthKey": "FAKE-CLIENT-AUTH-KEY",
+                "version": "V1.0.1",
+                "bodyFormat": "JSON",
+                "timestamp": timestamp,
+                "paramContent": encrypted_content,
+                "sign": base64.b64encode(signature).decode(),
+            },
+            {
+                "merchant_id": attempt.merchant_id,
+                "transaction_id": result["orderNo"],
+            },
+        )
+
+    @staticmethod
+    def _encrypt_chunks(plaintext, public_key):
+        block_size = public_key.key_size // 8
+        max_chunk_size = block_size - 11
+        ciphertext = bytearray()
+        for offset in range(0, len(plaintext), max_chunk_size):
+            ciphertext.extend(
+                public_key.encrypt(
+                    plaintext[offset : offset + max_chunk_size],
+                    padding.PKCS1v15(),
+                )
+            )
+        return base64.b64encode(ciphertext).decode()
