@@ -5,15 +5,27 @@
         <field name="model">pos.payment.method</field>
         <field name="inherit_id" ref="point_of_sale.pos_payment_method_view_form"/>
         <field name="arch" type="xml">
+            <xpath expr="//field[@name='payment_method_type']" position="after">
+                <div
+                    name="opay_bank_journal_hint"
+                    class="alert alert-info mb-2"
+                    role="alert"
+                    invisible="payment_method_type != 'terminal' or type == 'bank'"
+                >
+                    To configure OPay, select a Bank journal. Odoo then displays OPay under Integrate with.
+                </div>
+            </xpath>
             <xpath expr="//field[@name='use_payment_terminal']" position="after">
-                <separator string="OPay" invisible="use_payment_terminal != 'opay'"/>
+                <separator string="OPay Merchant and Terminal" invisible="use_payment_terminal != 'opay'"/>
                 <field name="opay_head_merchant_id" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
                 <field name="opay_merchant_id" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
                 <field name="opay_terminal_sn" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
                 <field name="opay_sub_scene_enum" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
+                <separator string="OPay Authentication" invisible="use_payment_terminal != 'opay'"/>
                 <field name="opay_client_auth_key" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'" widget="password"/>
                 <field name="opay_public_key" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
                 <field name="opay_merchant_private_key" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'" widget="password"/>
+                <separator string="OPay Webhook" invisible="use_payment_terminal != 'opay'"/>
                 <field name="opay_event_url" invisible="use_payment_terminal != 'opay'" widget="CopyClipboardChar"/>
             </xpath>
         </field>

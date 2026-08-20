@@ -87,11 +87,56 @@ class TestPosPaymentMethod(TransactionCase):
             ),
             "password",
         )
+        journal_hint = form_arch.xpath("//div[@name='opay_bank_journal_hint']")
+        self.assertEqual(len(journal_hint), 1)
+        self.assertEqual(
+            journal_hint[0].get("invisible"),
+            "payment_method_type != 'terminal' or type == 'bank'",
+        )
+        self.assertIn("select a Bank journal", " ".join(journal_hint[0].itertext()))
+        for section in (
+            "OPay Merchant and Terminal",
+            "OPay Authentication",
+            "OPay Webhook",
+        ):
+            self.assertEqual(
+                len(form_arch.xpath(f"//separator[@string='{section}']")), 1
+            )
+
+    def test_opay_configuration_metadata_matches_onboarding_terms(self):
+        expected_terms = {
+            "opay_head_merchant_id": ("headMerchantId", "Head Merchant ID"),
+            "opay_merchant_id": ("merchantId", "branch"),
+            "opay_terminal_sn": ("(sn)", "physical OPay terminal"),
+            "opay_sub_scene_enum": ("subSceneEnum", "do not guess"),
+            "opay_client_auth_key": ("clientAuthKey", "never sent to the cashier POS"),
+            "opay_public_key": ("OPay Public Key", "merchant public key"),
+            "opay_merchant_private_key": ("Merchant Private Key", "registered with OPay"),
+            "opay_event_url": ("OPay Webhook URL", "public HTTPS URL"),
+        }
+
+        for field_name, (label_term, help_term) in expected_terms.items():
+            with self.subTest(field_name=field_name):
+                field = self.payment_method_model._fields[field_name]
+                self.assertIn(label_term, field.string)
+                self.assertIn(help_term, field.help)
+        for field_name in (
+            "opay_client_auth_key",
+            "opay_public_key",
+            "opay_merchant_private_key",
+        ):
+            self.assertEqual(
+                self.payment_method_model._fields[field_name].groups,
+                "base.group_erp_manager",
+            )
 
     def test_opay_requires_complete_configuration(self):
         incomplete_values = dict(self.opay_values, opay_client_auth_key=False)
 
-        with self.assertRaisesRegex(ValidationError, "OPay Client Auth Key"):
+        with self.assertRaisesRegex(
+            ValidationError,
+            "OPay Test Terminal.*OPay Client Auth Key \\(clientAuthKey\\)",
+        ):
             self.payment_method_model.create(incomplete_values)
 
     def test_opay_terminal_must_be_unique(self):

@@ -2,9 +2,16 @@
     "name": "OPay POS Terminal",
     "version": "19.0.1.0.0",
     "summary": "OPay payment terminal integration for Odoo Point of Sale",
+    "description": """
+Connect Odoo Point of Sale to OPay physical POS terminals in Nigeria.
+
+The addon provides server-side authenticated Create Payment and Query Order
+requests, authenticated webhook processing, cashier-triggered payment-status
+checks, and auditable payment-attempt records.
+""",
     "category": "Sales/Point of Sale",
     "license": "LGPL-3",
-    "author": "OPay",
+    "author": "Opay Digital Services Limited",
 
     "depends": [
         "point_of_sale",

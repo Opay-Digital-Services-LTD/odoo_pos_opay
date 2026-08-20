@@ -36,47 +36,74 @@ class PosPaymentMethod(models.Model):
         ]
 
     opay_head_merchant_id = fields.Char(
-        string="OPay Business ID",
+        string="OPay Business ID (headMerchantId)",
         copy=False,
-        help="The Head Merchant ID (headMerchantId) supplied by OPay.",
+        help=(
+            "The OPay Business ID, also called the Head Merchant ID "
+            "(headMerchantId), supplied by OPay."
+        ),
     )
     opay_merchant_id = fields.Char(
-        string="OPay Branch ID",
+        string="OPay Branch ID (merchantId)",
         copy=False,
-        help="The Branch Merchant ID (merchantId) supplied by OPay.",
+        help=(
+            "The OPay Branch ID (merchantId) supplied by OPay for the branch "
+            "that owns this terminal."
+        ),
     )
     opay_terminal_sn = fields.Char(
-        string="OPay Terminal Serial Number",
+        string="OPay Terminal Serial Number (sn)",
         copy=False,
-        help="The serial number (sn) of the physical OPay terminal.",
+        help=(
+            "The serial number (sn) of the physical OPay terminal that should "
+            "receive payment amounts from this payment method."
+        ),
     )
     opay_client_auth_key = fields.Char(
-        string="OPay Client Auth Key",
+        string="OPay Client Auth Key (clientAuthKey)",
         copy=False,
         groups="base.group_erp_manager",
-        help="The clientAuthKey supplied in the OPay Business Dashboard.",
+        help=(
+            "The sensitive clientAuthKey from the OPay Business Dashboard "
+            "Developer Tool. It stays on the Odoo server and is never sent to "
+            "the cashier POS."
+        ),
     )
     opay_public_key = fields.Text(
         string="OPay Public Key",
         copy=False,
         groups="base.group_erp_manager",
-        help="The OPay public key used to encrypt requests and verify responses.",
+        help=(
+            "OPay's RSA public key, used on the Odoo server to encrypt requests "
+            "and verify OPay signatures. Do not enter the merchant public key."
+        ),
     )
     opay_merchant_private_key = fields.Text(
         string="Merchant Private Key",
         copy=False,
         groups="base.group_erp_manager",
-        help="The merchant private key used to sign requests and decrypt responses.",
+        help=(
+            "The sensitive merchant RSA private key whose public key is "
+            "registered with OPay. It is used on the Odoo server to sign "
+            "requests and decrypt responses, and is never sent to the cashier POS."
+        ),
     )
     opay_sub_scene_enum = fields.Char(
-        string="OPay Sub Scene",
+        string="OPay Sub Scene (subSceneEnum)",
         copy=False,
-        help="The subSceneEnum value supplied by OPay for this integration.",
+        help=(
+            "The exact subSceneEnum value assigned by OPay for this POS "
+            "integration. Contact OPay for this value; do not guess it."
+        ),
     )
     opay_event_url = fields.Char(
         string="OPay Webhook URL",
         compute="_compute_opay_event_url",
         readonly=True,
+        help=(
+            "Register this public HTTPS URL in the OPay Business Dashboard under "
+            "Developer Tool > POS & Others. It is generated from Odoo's web base URL."
+        ),
     )
     opay_latest_payment_reference = fields.Char(
         copy=False,
@@ -135,7 +162,10 @@ class PosPaymentMethod(models.Model):
             if missing_labels:
                 raise ValidationError(
                     _(
-                        "Complete the following OPay configuration fields: %(fields)s.",
+                        "OPay payment method %(payment_method)s is missing required "
+                        "configuration: %(fields)s. Enter the values supplied by "
+                        "OPay before saving.",
+                        payment_method=payment_method.display_name,
                         fields=", ".join(missing_labels),
                     )
                 )

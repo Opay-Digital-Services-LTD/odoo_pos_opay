@@ -1,0 +1,150 @@
+<section class="container py-4">
+    <div class="text-center mb-5">
+        <h1 class="display-4">OPay POS Terminal</h1>
+        <p class="lead">
+            Send Odoo Point of Sale payment amounts to a configured physical OPay
+            terminal and complete the exact payment line only after an authenticated
+            final result.
+        </p>
+    </div>
+
+    <div class="alert alert-info mb-4" role="alert">
+        <strong>Verified platform:</strong> Odoo 19 Community. Odoo 19 Enterprise
+        compatibility is not yet verified.
+    </div>
+
+    <div class="row mb-5">
+        <div class="col-lg-6 mb-4">
+            <div class="border rounded h-100 p-4">
+                <h2 class="h4">Native POS terminal flow</h2>
+                <p>
+                    OPay is registered through Odoo's payment-terminal interface. The
+                    cashier selects OPay on the standard Payment screen, and the Odoo
+                    server sends the amount to the terminal configured on that payment
+                    method.
+                </p>
+            </div>
+        </div>
+        <div class="col-lg-6 mb-4">
+            <div class="border rounded h-100 p-4">
+                <h2 class="h4">Authenticated final status</h2>
+                <p>
+                    Create Payment acceptance leaves the line waiting. A payment is
+                    completed only after a correlated SUCCESS result from the
+                    authenticated webhook or the cashier's Check Payment Status action.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-5">
+        <h2 class="h3">Included features</h2>
+        <ul>
+            <li>OPay terminal configuration on Odoo POS payment methods.</li>
+            <li>Physical-terminal Create Payment for NGN transactions.</li>
+            <li>Stable payment references and duplicate Create protection.</li>
+            <li>Authenticated webhook processing with exact attempt correlation.</li>
+            <li>Cashier-triggered Check Payment Status using Query Order.</li>
+            <li>SUCCESS, FAIL, CLOSE, CANCEL, PENDING, and uncertain-state handling.</li>
+            <li>Read-only operational payment-attempt records.</li>
+            <li>Multi-company isolation and safe operational logging.</li>
+        </ul>
+    </div>
+
+    <div class="mb-5">
+        <h2 class="h3">Requirements</h2>
+        <div class="table-responsive">
+            <table class="table table-bordered">
+                <tbody>
+                    <tr>
+                        <th scope="row">Odoo</th>
+                        <td>Odoo 19 Community with Point of Sale</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Hosting</th>
+                        <td>
+                            A deployment that permits third-party Python addons; Odoo
+                            Online (SaaS) is not supported
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Market and currency</th>
+                        <td>Nigeria and NGN only</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">OPay service</th>
+                        <td>
+                            An OPay merchant enabled for the public physical POS API,
+                            valid API credentials, and an assigned physical terminal
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Terminal assignment</th>
+                        <td>One unique terminal serial number per OPay payment method</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Connectivity</th>
+                        <td>
+                            Outbound HTTPS access to OPay and a public HTTPS Odoo URL for
+                            webhook delivery
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="row mb-5">
+        <div class="col-lg-6 mb-4">
+            <h2 class="h3">Payment lifecycle</h2>
+            <ol>
+                <li>The cashier selects the configured OPay payment method.</li>
+                <li>Odoo sends the amount to the assigned physical terminal.</li>
+                <li>The payment line remains waiting while the customer pays.</li>
+                <li>
+                    The authenticated webhook or Check Payment Status resolves the
+                    existing attempt.
+                </li>
+                <li>Only a correlated SUCCESS result completes the payment line.</li>
+            </ol>
+        </div>
+        <div class="col-lg-6 mb-4">
+            <h2 class="h3">Status resolution</h2>
+            <p>
+                Query Order is not polled automatically. Final status comes from the
+                authenticated OPay webhook or an explicit cashier Check Payment Status
+                action. PENDING and uncertain outcomes remain waiting and never trigger
+                a blind Create Payment retry.
+            </p>
+        </div>
+    </div>
+
+    <div class="mb-5">
+        <h2 class="h3">Security boundary</h2>
+        <p>
+            Merchant identifiers, terminal configuration, clientAuthKey, and RSA keys
+            remain on the Odoo server. The POS browser does not call OPay directly and
+            does not receive the authentication key or key material. API responses and
+            webhook notifications are authenticated before transaction data is trusted.
+        </p>
+    </div>
+
+    <div class="mb-5">
+        <h2 class="h3">External service and data transfer</h2>
+        <p>
+            This addon requires the external OPay cloud POS service. When the cashier
+            deliberately starts or checks an OPay payment, the Odoo server sends OPay
+            the configured Business ID, Branch ID, terminal serial number, payment
+            reference, amount, NGN currency, expiry, scene/sub-scene, split indicator,
+            and authenticated protocol envelope. The addon does not send customer,
+            card, PIN, or account details in its Create Payment or Query Order payloads.
+        </p>
+    </div>
+
+    <div class="alert alert-secondary" role="alert">
+        <strong>Current limitations:</strong> Odoo Enterprise compatibility, specific
+        terminal-model coverage, live end-to-end webhook delivery, OPay certification,
+        refunds, reversals, shared terminals, split payments, and currencies or markets
+        outside NGN/Nigeria are not claimed.
+    </div>
+</section>

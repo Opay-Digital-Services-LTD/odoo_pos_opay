@@ -8,5 +8,27 @@ __pycache__/
 *.env
 *.log
 
+# Local Odoo configuration and key material
+odoo*.conf
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# Test and build artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+test-results/
+screenshots/
+screencasts/
+dist/
+
+docs/*
+!docs/OPAY_ONBOARDING.md
+AGENTS.md
+
 Thumbs.db
 .DS_Store
