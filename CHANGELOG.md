@@ -82,13 +82,12 @@ addon release number.
 
 ### Known limitations
 
-- Only Odoo 19 Community has been verified; Enterprise compatibility is not yet
-  verified.
 - Live payment operation is limited to NGN in Nigeria using an OPay-provisioned
   physical terminal enabled for the public wireless/offline POS API.
 - Live Create Payment and cashier-triggered Query Order have been verified;
   end-to-end live OPay webhook delivery is not yet verified.
 - One OPay payment method maps to one unique terminal serial number. Shared
   terminals and split payments are not supported.
+- The Odoo Apps listing is free under the LGPL-3 license.
 - Refunds and reversals are not implemented because a supported OPay contract
   has not been confirmed.

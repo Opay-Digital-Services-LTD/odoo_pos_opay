@@ -21,8 +21,7 @@ configuration files.
 - `isSplit = N`;
 - one Odoo OPay payment method for one unique physical terminal serial number.
 
-Odoo 19 Community has been verified in the current environment. Odoo 19
-Enterprise is not yet verified.
+Odoo 19 Community has been verified in the current environment.
 
 ## Values to request from OPay
 
@@ -267,9 +266,7 @@ attempt is authoritatively reconciled.
 
 Before making broader public support claims, verify and record:
 
-- Odoo 19 Enterprise installation and complete POS flow;
 - live OPay webhook delivery, response acknowledgement, and POS notification;
-- supported physical terminal models/firmware from OPay;
 - any OPay certification or production approval requirements;
 - vendor support contact and service-level expectations.
 

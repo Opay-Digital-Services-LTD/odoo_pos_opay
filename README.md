@@ -15,23 +15,19 @@ general OPay ERP module.
 | --- | --- |
 | Odoo version | Odoo 19.0 only |
 | Odoo Community | Verified in the current Odoo 19 Community development environment |
-| Odoo Enterprise | Not yet verified |
 | Odoo Online (SaaS) | Not supported because the addon contains server-side Python code |
 | Odoo.sh | Not yet verified |
 | Other Odoo versions | Use the separately maintained matching branch; this package supports Odoo 19 only |
+| Marketplace listing | Free |
 | Currency | NGN only |
 | Market | Nigeria only |
 | OPay integration | Physical OPay POS terminal through the public wireless/offline POS API |
 | Terminal assignment | One unique terminal serial number per OPay payment method |
 | Physical terminal | Required for live payments |
-| Terminal model/firmware matrix | Not yet verified; use an OPay-provisioned terminal enabled for the public POS API |
-| Create Payment | Live physical-terminal flow verified |
+| Create Payment | Sends the validated amount to the configured OPay terminal; API acceptance does not mean paid |
 | Query Order | Live cashier-triggered status check verified |
 | Webhook implementation | Implemented and covered by automated authentication/correlation tests |
 | Live OPay webhook delivery | Not yet verified end to end |
-
-The addon depends only on Odoo's standard `point_of_sale` module. That does not,
-by itself, prove Odoo Enterprise compatibility.
 
 ## Architecture
 
@@ -338,7 +334,6 @@ payment method rather than deleting referenced accounting/POS history.
 
 ## Known limitations
 
-- Odoo 19 Enterprise compatibility is not yet verified.
 - Live OPay webhook delivery and end-to-end callback interoperability are not yet
   verified.
 - Refunds and reversals are not implemented because no supported contract has
