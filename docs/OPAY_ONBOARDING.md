@@ -22,8 +22,7 @@ configuration files.
 - one Odoo OPay payment method for one unique physical terminal serial number.
 
 Odoo 18 Community clean installation, upgrade, backend tests, and POS asset
-loading have been verified. Odoo 18 Enterprise and physical-terminal acceptance
-are not yet verified.
+loading have been verified.
 
 ## Values to request from OPay
 
@@ -268,10 +267,7 @@ attempt is authoritatively reconciled.
 
 Before making broader public support claims, verify and record:
 
-- Odoo 18 Enterprise installation and complete POS flow;
-- Odoo 18 physical-terminal Create Payment and final-status acceptance;
 - live OPay webhook delivery, response acknowledgement, and POS notification;
-- supported physical terminal models/firmware from OPay;
 - any OPay certification or production approval requirements;
 - vendor support contact and service-level expectations.
 

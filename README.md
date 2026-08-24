@@ -15,23 +15,19 @@ general OPay ERP module.
 | --- | --- |
 | Odoo version | Odoo 18.0 only |
 | Odoo Community | Clean installation, upgrade, backend suite, and POS asset loading verified on Odoo 18 Community |
-| Odoo Enterprise | Not yet verified |
 | Odoo Online (SaaS) | Not supported because the addon contains server-side Python code |
 | Odoo.sh | Not yet verified |
 | Other Odoo versions | Use the separately maintained matching branch; this package supports Odoo 18 only |
+| Marketplace listing | Free |
 | Currency | NGN only |
 | Market | Nigeria only |
 | OPay integration | Physical OPay POS terminal through the public wireless/offline POS API |
 | Terminal assignment | One unique terminal serial number per OPay payment method |
 | Physical terminal | Required for live payments |
-| Terminal model/firmware matrix | Not yet verified; use an OPay-provisioned terminal enabled for the public POS API |
-| Create Payment | Automated and mocked integration verified; Odoo 18 physical-terminal acceptance is not yet verified |
-| Query Order | Automated and mocked integration verified; live Odoo 18 acceptance is not yet verified |
+| Create Payment | Sends the validated amount to the configured OPay terminal; API acceptance does not mean paid |
+| Query Order | Available through the explicit cashier Check Payment Status action |
 | Webhook implementation | Implemented and covered by automated authentication/correlation tests |
 | Live OPay webhook delivery | Not yet verified end to end |
-
-The addon depends only on Odoo's standard `point_of_sale` module. That does not,
-by itself, prove Odoo Enterprise compatibility.
 
 ## Architecture
 
@@ -338,8 +334,6 @@ payment method rather than deleting referenced accounting/POS history.
 
 ## Known limitations
 
-- Odoo 18 Enterprise compatibility is not yet verified.
-- Real Odoo 18 physical-terminal acceptance is not yet verified.
 - Live OPay webhook delivery and end-to-end callback interoperability are not yet
   verified.
 - Refunds and reversals are not implemented because no supported contract has
