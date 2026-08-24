@@ -6,7 +6,12 @@ from uuid import UUID
 from odoo import _, api, fields, models
 from odoo.exceptions import AccessDenied, UserError, ValidationError
 
-from ..services.opay_api import OPayAPIError, OPayClient, OPayConnectionError
+from ..services.opay_api import (
+    OPayAPIError,
+    OPayClient,
+    OPayConnectionError,
+    OPayOrderNotFoundError,
+)
 from ..services.opay_auth import (
     OPayAuthenticationError,
     OPayConfigurationError,
@@ -395,7 +400,14 @@ class PosPaymentMethod(models.Model):
             OPayMalformedResponseError,
             OPayError,
         ) as error:
-            attempt.status = "uncertain"
+            attempt.write(
+                {
+                    "status": "uncertain",
+                    "last_status_message": attempt._safe_message(
+                        error.opay_message
+                    ),
+                }
+            )
             configured_method.opay_latest_status = attempt.status
             configured_method._opay_log_create_api(
                 attempt,
@@ -404,14 +416,27 @@ class PosPaymentMethod(models.Model):
                 level=logging.WARNING,
                 error_type=type(error).__name__,
                 error_category=error.category,
+                error_reason=error.reason_code or "-",
+                code=error.opay_code or "-",
             )
-            return attempt.frontend_response(ambiguous=True)
+            return attempt.frontend_response(
+                message=attempt._append_opay_message(
+                    _(
+                        "OPay may have received this payment request. Its status "
+                        "must be checked before another payment is created."
+                    ),
+                    error.opay_message,
+                    verified=False,
+                ),
+                ambiguous=True,
+            )
 
         attempt.write(
             {
                 "order_no": result.order_no,
                 "status": "waiting",
                 "last_source": "create",
+                "last_status_message": attempt._safe_message(result.message),
             }
         )
         configured_method.write(
@@ -427,8 +452,11 @@ class PosPaymentMethod(models.Model):
             level=logging.INFO,
         )
         return attempt.frontend_response(
-            message=_(
-                "OPay accepted the payment request. Waiting for customer payment."
+            message=attempt._append_opay_message(
+                _(
+                    "OPay accepted the payment request. Waiting for customer payment."
+                ),
+                result.message,
             )
         )
 
@@ -518,6 +546,25 @@ class PosPaymentMethod(models.Model):
             result = self._opay_validate_missing_attempt_query(
                 result, out_order_no, client
             )
+        except OPayOrderNotFoundError as error:
+            configured_method._opay_log_missing_attempt_query(
+                reference=reference,
+                out_order_no=out_order_no,
+                outcome="confirmed_absent",
+                status="not_found",
+                started_at=started_at,
+                level=logging.INFO,
+                code=error.code,
+                error_type=type(error).__name__,
+                error_category=error.category,
+                error_reason=error.reason_code,
+            )
+            return self._opay_missing_attempt_not_found_response(
+                reference,
+                out_order_no,
+                session,
+                error.opay_message,
+            )
         except OPayAPIError as error:
             # OPay's POS documentation does not define an authoritative
             # order-not-found response. No API rejection code/message can be
@@ -534,7 +581,11 @@ class PosPaymentMethod(models.Model):
                 error_category=error.category,
             )
             return self._opay_missing_attempt_uncertain_response(
-                reference, out_order_no, session
+                reference,
+                out_order_no,
+                session,
+                opay_message=error.opay_message,
+                verified=True,
             )
         except (
             OPayConnectionError,
@@ -552,9 +603,15 @@ class PosPaymentMethod(models.Model):
                 level=logging.WARNING,
                 error_type=type(error).__name__,
                 error_category=error.category,
+                error_reason=error.reason_code or "-",
+                code=error.opay_code or "-",
             )
             return self._opay_missing_attempt_uncertain_response(
-                reference, out_order_no, session
+                reference,
+                out_order_no,
+                session,
+                opay_message=error.opay_message,
+                verified=False,
             )
 
         opay_status = result["status"]
@@ -579,11 +636,15 @@ class PosPaymentMethod(models.Model):
             level=logging.INFO,
             order_no=result["orderNo"],
         )
+        response_message = self.env["pos.opay.payment.attempt"]._append_opay_message(
+            messages[opay_status],
+            result.get(OPayClient.RESPONSE_MESSAGE_KEY),
+        )
         return {
             "success": False,
             "status": frontend_status,
             "opay_status": opay_status,
-            "message": messages[opay_status],
+            "message": response_message,
             "payment_method_id": self.id,
             "pos_session_id": session.id,
             "reference": reference,
@@ -644,16 +705,27 @@ class PosPaymentMethod(models.Model):
         }
 
     def _opay_missing_attempt_uncertain_response(
-        self, reference, out_order_no, session
+        self,
+        reference,
+        out_order_no,
+        session,
+        opay_message=None,
+        verified=False,
     ):
+        message = _(
+            "The OPay payment could not be verified. Do not start another "
+            "OPay payment until the current attempt is resolved."
+        )
+        message = self.env["pos.opay.payment.attempt"]._append_opay_message(
+            message,
+            opay_message,
+            verified=verified,
+        )
         return {
             "success": False,
             "status": "uncertain",
             "opay_status": False,
-            "message": _(
-                "The OPay payment could not be verified. Do not start another "
-                "OPay payment until the current attempt is resolved."
-            ),
+            "message": message,
             "payment_method_id": self.id,
             "pos_session_id": session.id,
             "reference": reference,
@@ -666,6 +738,39 @@ class PosPaymentMethod(models.Model):
             "safe_to_retry": False,
             "local_attempt_missing": True,
             "recovery_state": "opay_query_uncertain",
+        }
+
+    def _opay_missing_attempt_not_found_response(
+        self,
+        reference,
+        out_order_no,
+        session,
+        opay_message,
+    ):
+        message = self.env["pos.opay.payment.attempt"]._append_opay_message(
+            _(
+                "OPay confirmed that this payment order does not exist. "
+                "The payment may be tried again."
+            ),
+            opay_message,
+        )
+        return {
+            "success": False,
+            "status": "not_found",
+            "opay_status": False,
+            "message": message,
+            "payment_method_id": self.id,
+            "pos_session_id": session.id,
+            "reference": reference,
+            "out_order_no": out_order_no,
+            "order_no": False,
+            "payment_completed": False,
+            "ambiguous": False,
+            "terminal_released": True,
+            "reused": True,
+            "safe_to_retry": True,
+            "local_attempt_missing": True,
+            "recovery_state": "opay_order_confirmed_absent",
         }
 
     def _opay_attempt_reference(self, reference):
@@ -764,6 +869,7 @@ class PosPaymentMethod(models.Model):
         code="-",
         error_type="-",
         error_category="-",
+        error_reason="-",
     ):
         self.ensure_one()
         _logger.log(
@@ -771,7 +877,8 @@ class PosPaymentMethod(models.Model):
             "event=opay_create_payment_api outcome=%s source=create "
             "reason=payment_request payment_method_id=%s attempt_id=%s "
             "reference=%s out_order_no=%s order_no=%s terminal_sn=%s "
-            "status=%s error_type=%s code=%s error_category=%s duration_ms=%s",
+            "status=%s error_type=%s code=%s error_category=%s error_reason=%s "
+            "duration_ms=%s",
             outcome,
             self.id,
             attempt.id,
@@ -783,6 +890,7 @@ class PosPaymentMethod(models.Model):
             error_type,
             code,
             error_category,
+            error_reason,
             self._opay_duration_ms(started_at),
         )
 
@@ -799,6 +907,7 @@ class PosPaymentMethod(models.Model):
         code="-",
         error_type="-",
         error_category="-",
+        error_reason="-",
     ):
         self.ensure_one()
         _logger.log(
@@ -806,7 +915,8 @@ class PosPaymentMethod(models.Model):
             "event=opay_query_order_api outcome=%s source=query "
             "reason=manual_create_recovery payment_method_id=%s attempt_id=- "
             "reference=%s out_order_no=%s order_no=%s terminal_sn=%s "
-            "status=%s error_type=%s code=%s error_category=%s duration_ms=%s",
+            "status=%s error_type=%s code=%s error_category=%s error_reason=%s "
+            "duration_ms=%s",
             outcome,
             self.id,
             reference,
@@ -817,6 +927,7 @@ class PosPaymentMethod(models.Model):
             error_type,
             code,
             error_category,
+            error_reason,
             self._opay_duration_ms(started_at),
         )
 

@@ -8,6 +8,7 @@ from odoo.addons.pos_opay.services.opay_api import (
     OPayConnectionError,
     OPayCreatePaymentResult,
     OPayHTTPError,
+    OPayOrderNotFoundError,
 )
 from odoo.addons.pos_opay.services.opay_auth import OPayConfigurationError
 from odoo.exceptions import UserError, ValidationError
@@ -75,18 +76,15 @@ class TestPosPaymentMethod(TransactionCase):
                 "use_payment_terminal == 'opay'",
             )
 
-        self.assertEqual(
-            form_arch.xpath("//field[@name='opay_client_auth_key']")[0].get(
-                "widget"
-            ),
-            "password",
-        )
-        self.assertEqual(
-            form_arch.xpath("//field[@name='opay_merchant_private_key']")[0].get(
-                "widget"
-            ),
-            "password",
-        )
+        for field_name in (
+            "opay_client_auth_key",
+            "opay_public_key",
+            "opay_merchant_private_key",
+        ):
+            self.assertEqual(
+                form_arch.xpath(f"//field[@name='{field_name}']")[0].get("widget"),
+                "password",
+            )
         journal_hint = form_arch.xpath("//div[@name='opay_bank_journal_hint']")
         self.assertEqual(len(journal_hint), 1)
         self.assertEqual(
@@ -94,6 +92,17 @@ class TestPosPaymentMethod(TransactionCase):
             "payment_method_type != 'terminal' or type == 'bank'",
         )
         self.assertIn("select a Bank journal", " ".join(journal_hint[0].itertext()))
+        service_disclosure = form_arch.xpath(
+            "//div[@name='opay_external_service_disclosure']"
+        )
+        self.assertEqual(len(service_disclosure), 1)
+        self.assertEqual(
+            service_disclosure[0].get("invisible"),
+            "use_payment_terminal != 'opay'",
+        )
+        disclosure_text = " ".join(service_disclosure[0].itertext())
+        self.assertIn("external OPay cloud POS service", disclosure_text)
+        self.assertIn("does not send customer card", disclosure_text)
         for section in (
             "OPay Merchant and Terminal",
             "OPay Authentication",
@@ -213,6 +222,7 @@ class TestPosPaymentMethod(TransactionCase):
         client.create_payment.return_value = OPayCreatePaymentResult(
             out_order_no=self.out_order_no,
             order_no="OPAY-ORDER-1",
+            message="payment request accepted",
         )
 
         with patch.object(
@@ -231,6 +241,7 @@ class TestPosPaymentMethod(TransactionCase):
         self.assertFalse(result["ambiguous"])
         self.assertFalse(result["terminal_released"])
         self.assertFalse(result["reused"])
+        self.assertIn("payment request accepted", result["message"])
         client_factory.assert_called_once()
         self.assertEqual(client_factory.call_args.args[0], payment_method)
         client.create_payment.assert_called_once_with(
@@ -509,6 +520,32 @@ class TestPosPaymentMethod(TransactionCase):
         self.assertEqual(result["pos_session_id"], session.id)
         self.assertEqual(result["out_order_no"], self.out_order_no)
         self.assertFalse(result["order_no"])
+        client.query_payment.assert_called_once_with(out_order_no=self.out_order_no)
+        client.create_payment.assert_not_called()
+
+    def test_missing_local_attempt_exact_remote_absence_allows_retry(self):
+        payment_method, session = self._runtime_records()
+        client = Mock(spec=OPayClient)
+        client.query_payment.side_effect = OPayOrderNotFoundError(
+            "50002", "order not exist"
+        )
+
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            result = payment_method.opay_resolve_create_outcome(
+                {
+                    "reference": self.payment_uuid,
+                    "session_id": session.id,
+                }
+            )
+
+        self.assertEqual(result["status"], "not_found")
+        self.assertEqual(result["recovery_state"], "opay_order_confirmed_absent")
+        self.assertTrue(result["local_attempt_missing"])
+        self.assertTrue(result["safe_to_retry"])
+        self.assertTrue(result["terminal_released"])
+        self.assertFalse(result["payment_completed"])
+        self.assertFalse(result["ambiguous"])
+        self.assertIn("order not exist", result["message"])
         client.query_payment.assert_called_once_with(out_order_no=self.out_order_no)
         client.create_payment.assert_not_called()
 

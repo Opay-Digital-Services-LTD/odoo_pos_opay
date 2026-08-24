@@ -14,9 +14,50 @@ class OPayError(Exception):
 
     category = "opay_error"
 
-    def __init__(self, message="", *, reason_code=None):
+    def __init__(
+        self,
+        message="",
+        *,
+        reason_code=None,
+        opay_code=None,
+        opay_message=None,
+    ):
         self.reason_code = reason_code
+        self.opay_code = self._safe_protocol_code(opay_code)
+        self.opay_message = self._safe_protocol_message(opay_message)
         super().__init__(message)
+
+    @staticmethod
+    def _safe_protocol_code(value):
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        if not normalized or len(normalized) > 32:
+            return None
+        if not normalized.isascii() or not all(
+            character.isalnum() or character in {"-", "_"}
+            for character in normalized
+        ):
+            return None
+        return normalized
+
+    @staticmethod
+    def _safe_protocol_message(value):
+        if not isinstance(value, str):
+            return None
+        printable = "".join(
+            character if character.isprintable() and character not in {"<", ">"} else " "
+            for character in value
+        )
+        return " ".join(printable.split())[:256] or None
+
+    def attach_protocol_metadata(self, response):
+        if not isinstance(response, dict):
+            return
+        if not self.opay_code:
+            self.opay_code = self._safe_protocol_code(response.get("code"))
+        if not self.opay_message:
+            self.opay_message = self._safe_protocol_message(response.get("message"))
 
 
 class OPayConfigurationError(OPayError):
@@ -119,21 +160,32 @@ class OPayAuth:
 
     def verify_response(self, response):
         if not isinstance(response, dict) or not isinstance(response.get("sign"), str):
-            raise OPayMalformedResponseError("OPay returned an invalid response signature.")
+            raise OPayMalformedResponseError(
+                "OPay returned an invalid response signature.",
+                reason_code="malformed_response_signature",
+            )
 
         signature_content = self.response_signature_content(response)
-        signature = self._decode_base64(
-            response["sign"], "OPay returned an invalid response signature."
-        )
+        try:
+            signature = self._decode_base64(
+                response["sign"], "OPay returned an invalid response signature."
+            )
+        except OPayMalformedResponseError as error:
+            raise OPayMalformedResponseError(
+                "OPay returned an invalid response signature.",
+                reason_code="malformed_response_signature",
+            ) from error
         try:
             self._verify_signature(signature, signature_content)
         except InvalidSignature as error:
             raise OPayAuthenticationError(
-                "OPay response signature verification failed."
+                "OPay response signature verification failed.",
+                reason_code="response_signature_verification_failure",
             ) from error
         except ValueError as error:
             raise OPayMalformedResponseError(
-                "OPay returned an invalid response signature."
+                "OPay returned an invalid response signature.",
+                reason_code="malformed_response_signature",
             ) from error
 
     def process_webhook(self, envelope, expected_client_auth_key, now_ms=None):
@@ -201,13 +253,20 @@ class OPayAuth:
         )
 
     def decrypt_response(self, encrypted_data):
-        encrypted_bytes = self._decode_base64(
-            encrypted_data, "OPay returned invalid encrypted response data."
-        )
+        try:
+            encrypted_bytes = self._decode_base64(
+                encrypted_data, "OPay returned invalid encrypted response data."
+            )
+        except OPayMalformedResponseError as error:
+            raise OPayMalformedResponseError(
+                "OPay returned invalid encrypted response data.",
+                reason_code="invalid_encrypted_response_data",
+            ) from error
         block_size = self._merchant_private_key.key_size // 8
         if not encrypted_bytes or len(encrypted_bytes) % block_size:
             raise OPayMalformedResponseError(
-                "OPay returned invalid encrypted response data."
+                "OPay returned invalid encrypted response data.",
+                reason_code="invalid_encrypted_response_data",
             )
 
         plaintext = bytearray()
@@ -222,43 +281,78 @@ class OPayAuth:
             return json.loads(plaintext.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
             raise OPayAuthenticationError(
-                "OPay response decryption failed."
+                "OPay response decryption failed.",
+                reason_code="response_decryption_failure",
             ) from error
 
     def process_response(self, response):
-        self._validate_response_envelope(response)
-        self.verify_response(response)
-        return {
-            "code": response["code"],
-            "message": response["message"],
-            "timestamp": response["timestamp"],
-            "data": self.decrypt_response(response["data"]),
-        }
+        try:
+            self._validate_response_envelope(response)
+            self.verify_response(response)
+            return {
+                "code": response["code"],
+                "message": response["message"],
+                "timestamp": response["timestamp"],
+                "data": self.decrypt_response(response["data"]),
+            }
+        except OPayError as error:
+            error.attach_protocol_metadata(response)
+            raise
 
     @staticmethod
     def _validate_response_envelope(response):
         if not isinstance(response, dict):
-            raise OPayMalformedResponseError("OPay returned an invalid response envelope.")
+            raise OPayMalformedResponseError(
+                "OPay returned an invalid response envelope.",
+                reason_code="response_not_object",
+            )
+        response_code = OPayError._safe_protocol_code(response.get("code"))
         required_fields = set(OPayAuth.RESPONSE_FIELDS) | {"sign"}
+        if response_code and response_code != "00000" and any(
+            not isinstance(response.get(field_name), str) or not response[field_name]
+            for field_name in ("data", "sign", "timestamp")
+        ):
+            raise OPayMalformedResponseError(
+                "OPay returned an unauthenticated error response.",
+                reason_code="untrusted_error_response",
+                opay_code=response_code,
+                opay_message=response.get("message"),
+            )
         if required_fields - set(response):
             raise OPayMalformedResponseError(
-                "OPay returned an incomplete response envelope."
+                "OPay returned an incomplete response envelope.",
+                reason_code="incomplete_response_envelope",
+                opay_code=response_code,
             )
         if any(
             not isinstance(response[field_name], str)
             for field_name in required_fields
         ):
             raise OPayMalformedResponseError(
-                "OPay returned an invalid response envelope."
+                "OPay returned an invalid response envelope.",
+                reason_code="invalid_response_field_type",
+                opay_code=response_code,
             )
-        if any(not response[field_name] for field_name in ("code", "data", "sign", "timestamp")):
+        empty_field_reasons = {
+            "code": "missing_response_code",
+            "data": "missing_response_data",
+            "sign": "missing_response_signature",
+            "timestamp": "missing_response_timestamp",
+        }
+        for field_name, reason_code in empty_field_reasons.items():
+            if response[field_name]:
+                continue
             raise OPayMalformedResponseError(
-                "OPay returned an invalid response envelope."
+                "OPay returned an invalid response envelope.",
+                reason_code=reason_code,
+                opay_code=response_code,
             )
         timestamp = response["timestamp"]
         if not timestamp.isdigit() or len(timestamp) > 15:
             raise OPayMalformedResponseError(
-                "OPay returned an invalid response timestamp."
+                "OPay returned an invalid response timestamp.",
+                reason_code="invalid_response_timestamp",
+                opay_code=response_code,
             )
 
     @staticmethod

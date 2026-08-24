@@ -18,7 +18,7 @@ general OPay ERP module.
 | Odoo Enterprise | Not yet verified |
 | Odoo Online (SaaS) | Not supported because the addon contains server-side Python code |
 | Odoo.sh | Not yet verified |
-| Earlier/later Odoo versions | Not yet verified; no compatibility claim is made |
+| Other Odoo versions | Use the separately maintained matching branch; this package supports Odoo 19 only |
 | Currency | NGN only |
 | Market | Nigeria only |
 | OPay integration | Physical OPay POS terminal through the public wireless/offline POS API |
@@ -61,6 +61,24 @@ Cashier clicks Check Payment Status -> Odoo Query Order -> exact payment line
 ```
 
 Query Order is not polled automatically.
+
+## External OPay service and transaction data
+
+This addon communicates with the external OPay cloud POS service only after an
+administrator deliberately configures OPay and a cashier starts an OPay payment
+or explicitly clicks **Check Payment Status**.
+
+For Create Payment, Odoo sends the configured Business ID, Branch ID, terminal
+serial number, stable payment reference, amount, NGN currency, expiry,
+scene/sub-scene, non-split indicator, timestamp, and authenticated encrypted
+protocol envelope. For Query Order, Odoo sends the stored merchant, terminal,
+and order references needed to query that same attempt.
+
+Odoo receives OPay's business order reference, OPay order reference, payment
+status, response message, timestamps, and authenticated webhook/query
+transaction data used for exact correlation. The addon does not send customer
+names, card details, PINs, bank-account details, or wallet credentials in its
+Create Payment or Query Order payloads.
 
 ## Implemented scope
 
@@ -235,7 +253,9 @@ are read-only, relational navigation is disabled, and the existing company rule
 limits records to the user's allowed companies.
 
 This screen does not provide manual status changes or an administrative Query
-Order action.
+Order action that can create or force a result. For an active attempt, an ERP
+Manager may use **Check Payment Status** to query the already-existing OPay
+order; the screen then refreshes its read-only status and timestamps.
 
 ## Troubleshooting
 
@@ -301,9 +321,9 @@ payment method rather than deleting referenced accounting/POS history.
 - `clientAuthKey`, the merchant private key, and the OPay public key stay on the
   Odoo server and are not loaded into POS cashier JavaScript.
 - Restricted key fields require the Odoo ERP Manager group.
-- The client authentication key and merchant private key use password-style
-  administrative widgets. A password widget masks display only; it does not
-  provide database encryption at rest.
+- The client authentication key, OPay public key, and merchant private key use
+  password-style administrative widgets. A password widget masks display only;
+  it does not provide database encryption at rest.
 - Protect the Odoo database, backups, administrator accounts, configuration
   exports, and server filesystem according to your organization's secret policy.
 - The POS browser never calls OPay directly.

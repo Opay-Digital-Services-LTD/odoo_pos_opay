@@ -3,7 +3,13 @@ import { PaymentInterface } from "@point_of_sale/app/utils/payment/payment_inter
 import { register_payment_method } from "@point_of_sale/app/services/pos_store";
 
 const WAITING_STATUSES = new Set(["waiting", "uncertain", "PENDING"]);
-const FAILED_STATUSES = new Set(["failed", "FAIL", "CLOSE", "CANCEL"]);
+const FAILED_STATUSES = new Set([
+    "failed",
+    "not_found",
+    "FAIL",
+    "CLOSE",
+    "CANCEL",
+]);
 export const MANUAL_STATUS_CHECK_COOLDOWN_MS = 4000;
 
 export class PaymentOpay extends PaymentInterface {
@@ -232,6 +238,12 @@ export class PaymentOpay extends PaymentInterface {
             return false;
         }
         this._storeReferences(paymentLine, response);
+
+        // Backend finalization is authoritative and first-final-wins. Keep the
+        // browser equally defensive if a delayed/conflicting event arrives.
+        if (paymentLine.isDone()) {
+            return response.status === "SUCCESS" && response.payment_completed === true;
+        }
 
         if (response.status === "SUCCESS" && response.payment_completed === true) {
             this._showStatus(response.message, "success");

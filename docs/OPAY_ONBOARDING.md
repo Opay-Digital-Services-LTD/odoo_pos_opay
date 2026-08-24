@@ -112,8 +112,8 @@ The key must not be password-encrypted because the current server loader does
 not accept a private-key passphrase. Restrict access to the Odoo database,
 backups, ERP Manager accounts, and configuration exports accordingly.
 
-The password-style Odoo widget masks the field on screen; it is not encryption
-at rest.
+Password-style Odoo widgets mask the client authentication key, OPay public key,
+and merchant private key on screen; this masking is not encryption at rest.
 
 ## Configure Odoo
 
@@ -234,7 +234,9 @@ Each attempt stores safe correlation identifiers for support:
 
 ERP Managers can inspect these values through **Point of Sale -> OPay Payment
 Attempts**. The screen is read-only and does not expose credentials or allow a
-status to be forced.
+status to be forced. For an active attempt, **Check Payment Status** queries the
+already-existing OPay order and refreshes the read-only status and timestamps;
+it never creates another payment.
 
 For server logs, search for:
 

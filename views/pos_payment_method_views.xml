@@ -17,13 +17,21 @@
             </xpath>
             <xpath expr="//field[@name='use_payment_terminal']" position="after">
                 <separator string="OPay Merchant and Terminal" invisible="use_payment_terminal != 'opay'"/>
+                <div
+                    name="opay_external_service_disclosure"
+                    class="alert alert-info mb-2"
+                    role="alert"
+                    invisible="use_payment_terminal != 'opay'"
+                >
+                    OPay payments use the external OPay cloud POS service. Odoo sends the configured merchant and terminal identifiers, payment reference, amount, NGN currency, and protocol data to OPay, and receives order references and payment statuses. This addon does not send customer card, PIN, bank-account, or wallet details.
+                </div>
                 <field name="opay_head_merchant_id" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
                 <field name="opay_merchant_id" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
                 <field name="opay_terminal_sn" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
                 <field name="opay_sub_scene_enum" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
                 <separator string="OPay Authentication" invisible="use_payment_terminal != 'opay'"/>
                 <field name="opay_client_auth_key" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'" widget="password"/>
-                <field name="opay_public_key" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'"/>
+                <field name="opay_public_key" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'" widget="password"/>
                 <field name="opay_merchant_private_key" invisible="use_payment_terminal != 'opay'" required="use_payment_terminal == 'opay'" widget="password"/>
                 <separator string="OPay Webhook" invisible="use_payment_terminal != 'opay'"/>
                 <field name="opay_event_url" invisible="use_payment_terminal != 'opay'" widget="CopyClipboardChar"/>

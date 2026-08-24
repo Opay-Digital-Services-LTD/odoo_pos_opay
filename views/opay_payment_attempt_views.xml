@@ -29,6 +29,17 @@
         <field name="model">pos.opay.payment.attempt</field>
         <field name="arch" type="xml">
             <form string="OPay Payment Attempt" create="0" edit="0" delete="0">
+                <header>
+                    <button
+                        name="action_opay_check_payment_status"
+                        string="Check Payment Status"
+                        type="object"
+                        class="oe_highlight"
+                        icon="fa-refresh"
+                        groups="base.group_erp_manager"
+                        invisible="status not in ['creating', 'waiting', 'uncertain', 'PENDING']"
+                    />
+                </header>
                 <sheet>
                     <group>
                         <group string="Payment">

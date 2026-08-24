@@ -102,6 +102,28 @@ class TestOPayPaymentAttemptViews(TransactionCase):
         with self.assertRaises(AccessError):
             attempt_model.check_access("unlink")
 
+    def test_active_attempt_form_has_manager_status_check_action(self):
+        root = self._view_root(
+            "pos_opay.pos_opay_payment_attempt_view_form", "form"
+        )
+        buttons = root.xpath(
+            ".//button[@name='action_opay_check_payment_status']"
+        )
+
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(buttons[0].get("type"), "object")
+        self.assertIn("uncertain", buttons[0].get("invisible"))
+
+        raw_root = etree.fromstring(
+            self.env.ref(
+                "pos_opay.pos_opay_payment_attempt_view_form"
+            ).arch_db
+        )
+        raw_button = raw_root.xpath(
+            ".//button[@name='action_opay_check_payment_status']"
+        )[0]
+        self.assertEqual(raw_button.get("groups"), "base.group_erp_manager")
+
     def test_operational_relations_cannot_open_configuration_forms(self):
         relation_fields = {"payment_method_id", "pos_config_id", "pos_session_id"}
 

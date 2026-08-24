@@ -258,6 +258,59 @@ test("missing local attempt remains uncertain when OPay absence is not authorita
     await expect(paymentResult).resolves.toBe(false);
 });
 
+test("exact Query not-found releases a lost Create without issuing Create again", async () => {
+    const notifications = [];
+    const store = await setupPosEnv();
+    const order = await getFilledOrder(store);
+    const opayPaymentMethod = store.models["pos.payment.method"].find(
+        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
+    );
+    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
+    let createCalls = 0;
+    let recoveryCalls = 0;
+    patchWithCleanup(store.notification, {
+        add(message, options) {
+            notifications.push({ message, options });
+        },
+    });
+    onRpc("pos.payment.method", "opay_create_payment_request", () => {
+        createCalls++;
+        throw new Error("browser response lost");
+    });
+    onRpc("pos.payment.method", "opay_resolve_create_outcome", () => {
+        recoveryCalls++;
+        return {
+            success: false,
+            status: "not_found",
+            message: "OPay response: order not exist",
+            payment_method_id: opayPaymentMethod.id,
+            pos_session_id: store.session.id,
+            reference: paymentLine.uuid,
+            out_order_no: "RECONSTRUCTED-STABLE-REFERENCE",
+            order_no: false,
+            payment_completed: false,
+            ambiguous: false,
+            terminal_released: true,
+            safe_to_retry: true,
+            local_attempt_missing: true,
+            recovery_state: "opay_order_confirmed_absent",
+        };
+    });
+
+    const paymentResult = paymentLine.pay();
+    await waitUntil(() => paymentLine.getPaymentStatus() === "waitingCard");
+    expect(createCalls).toBe(1);
+    expect(recoveryCalls).toBe(0);
+
+    await opayPaymentMethod.payment_terminal.checkPaymentStatus(paymentLine.uuid);
+
+    await expect(paymentResult).resolves.toBe(false);
+    expect(paymentLine.getPaymentStatus()).toBe("retry");
+    expect(notifications.at(-1).message).toBe("OPay response: order not exist");
+    expect(createCalls).toBe(1);
+    expect(recoveryCalls).toBe(1);
+});
+
 test("Create RPC failure recovers an existing pending attempt without another Create", async () => {
     const store = await setupPosEnv();
     const order = await getFilledOrder(store);
@@ -567,6 +620,41 @@ test("a notification for another session or reference cannot complete the line",
     ).toBe(false);
     expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
     expect(paymentLine.isDone()).toBe(false);
+});
+
+test("duplicate SUCCESS is idempotent and conflicting finals cannot downgrade it", async () => {
+    const store = await setupPosEnv();
+    const order = await getFilledOrder(store);
+    const opayPaymentMethod = store.models["pos.payment.method"].find(
+        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
+    );
+    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
+    const terminal = opayPaymentMethod.payment_terminal;
+    paymentLine.setPaymentStatus("waitingCard");
+    const success = {
+        success: true,
+        status: "SUCCESS",
+        payment_completed: true,
+        payment_method_id: opayPaymentMethod.id,
+        pos_session_id: store.session.id,
+        reference: paymentLine.uuid,
+        message: "OPay confirmed the payment successfully.",
+    };
+
+    expect(terminal.handleOpayStatusResponse(success)).toBe(true);
+    expect(terminal.handleOpayStatusResponse(success)).toBe(true);
+    for (const status of ["FAIL", "CLOSE", "CANCEL"]) {
+        expect(
+            terminal.handleOpayStatusResponse({
+                ...success,
+                success: false,
+                status,
+                payment_completed: false,
+            })
+        ).toBe(false);
+        expect(paymentLine.getPaymentStatus()).toBe("done");
+        expect(paymentLine.isDone()).toBe(true);
+    }
 });
 
 test("cancellation does not query OPay and refuses to remove an unresolved payment", async () => {

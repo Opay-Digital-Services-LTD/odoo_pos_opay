@@ -1,3 +1,12 @@
+<!--
+Marketplace media is intentionally not rendered until approved assets exist.
+Planned references and alt text:
+- icon.png — alt: "OPay POS Terminal application icon"
+- opay_pos_terminal_cover.png — alt: "OPay physical terminal payment flow in Odoo Point of Sale"
+- screenshots/payment_method_configuration.png — alt: "OPay terminal configuration on an Odoo payment method"
+- screenshots/pos_check_payment_status.png — alt: "Check Payment Status on a waiting OPay payment line"
+- screenshots/payment_attempt_status.png — alt: "Read-only OPay payment status and transaction references"
+-->
 <section class="container py-4">
     <div class="text-center mb-5">
         <h1 class="display-4">OPay POS Terminal</h1>
@@ -11,6 +20,21 @@
     <div class="alert alert-info mb-4" role="alert">
         <strong>Verified platform:</strong> Odoo 19 Community. Odoo 19 Enterprise
         compatibility is not yet verified.
+    </div>
+
+    <div class="mb-5">
+        <h2 class="h3">Installation and configuration</h2>
+        <ol>
+            <li>Install this package on Odoo 19 Community with Point of Sale.</li>
+            <li>Create a POS payment method using a Bank journal and Terminal integration.</li>
+            <li>Select OPay and enter the OPay-supplied merchant, terminal, and authentication values.</li>
+            <li>Add the payment method to the intended POS configuration.</li>
+            <li>Register the generated public HTTPS webhook URL with OPay.</li>
+        </ol>
+        <p>
+            Selecting OPay deliberately enables the external OPay data transfer
+            described below. The payment method maps to one unique physical terminal.
+        </p>
     </div>
 
     <div class="row mb-5">
@@ -138,6 +162,8 @@
             reference, amount, NGN currency, expiry, scene/sub-scene, split indicator,
             and authenticated protocol envelope. The addon does not send customer,
             card, PIN, or account details in its Create Payment or Query Order payloads.
+            Odoo receives OPay order references, transaction statuses, response
+            messages, timestamps, and authenticated webhook/query transaction data.
         </p>
     </div>
 
@@ -145,6 +171,7 @@
         <strong>Current limitations:</strong> Odoo Enterprise compatibility, specific
         terminal-model coverage, live end-to-end webhook delivery, OPay certification,
         refunds, reversals, shared terminals, split payments, and currencies or markets
-        outside NGN/Nigeria are not claimed.
+        outside NGN/Nigeria are not claimed. Odoo Online (SaaS) is not supported
+        because this package contains server-side Python code.
     </div>
 </section>
