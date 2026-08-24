@@ -2,7 +2,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 from odoo import Command, fields
-from odoo.exceptions import AccessError, UserError
+from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.tests.common import TransactionCase, tagged
 
 
@@ -95,7 +95,85 @@ class TestOPayMultiCompany(TransactionCase):
             .with_context(allowed_company_ids=companies.ids)
         )
 
+    def _create_bank_journal(self, company, suffix):
+        return self.env["account.journal"].with_company(company).create(
+            {
+                "name": f"OPay Odoo 18 Bank {suffix}",
+                "code": f"O{suffix}18",
+                "type": "bank",
+                "company_id": company.id,
+            }
+        )
+
+    def _opay_payment_method_values(
+        self, company, suffix, *, journal=None, configs=None
+    ):
+        return {
+            "name": f"OPay Odoo 18 Company Method {suffix}",
+            "company_id": company.id,
+            "payment_method_type": "terminal",
+            "use_payment_terminal": "opay",
+            "journal_id": journal.id if journal else False,
+            "config_ids": [Command.set(configs.ids)] if configs else False,
+            "opay_head_merchant_id": f"FAKE-HEAD-18-{suffix}",
+            "opay_merchant_id": f"FAKE-MERCHANT-18-{suffix}",
+            "opay_terminal_sn": f"FAKE-TERMINAL-18-{suffix}",
+            "opay_client_auth_key": f"FAKE-AUTH-18-{suffix}",
+            "opay_public_key": f"FAKE-PUBLIC-18-{suffix}",
+            "opay_merchant_private_key": f"FAKE-PRIVATE-18-{suffix}",
+            "opay_sub_scene_enum": f"FAKE-SCENE-18-{suffix}",
+        }
+
+    def test_opay_same_company_journal_and_config_succeed(self):
+        journal_a = self._create_bank_journal(self.company_a, "A")
+
+        payment_method = self.env["pos.payment.method"].create(
+            self._opay_payment_method_values(
+                self.company_a,
+                "VALID",
+                journal=journal_a,
+                configs=self.config_a,
+            )
+        )
+
+        self.assertEqual(payment_method.company_id, self.company_a)
+        self.assertEqual(payment_method.journal_id.company_id, self.company_a)
+        self.assertEqual(payment_method.config_ids, self.config_a)
+
+    def test_opay_cross_company_journal_is_rejected(self):
+        journal_b = self._create_bank_journal(self.company_b, "B")
+
+        with self.assertRaisesRegex(ValidationError, "journal.*company"):
+            self.env["pos.payment.method"].create(
+                self._opay_payment_method_values(
+                    self.company_a,
+                    "WRONG-JOURNAL",
+                    journal=journal_b,
+                )
+            )
+
+    def test_opay_cross_company_config_is_rejected(self):
+        journal_a = self._create_bank_journal(self.company_a, "A")
+
+        with self.assertRaisesRegex(ValidationError, "Every Point of Sale"):
+            self.env["pos.payment.method"].create(
+                self._opay_payment_method_values(
+                    self.company_a,
+                    "WRONG-CONFIG",
+                    journal=journal_a,
+                    configs=self.config_b,
+                )
+            )
+
     def test_company_consistent_attempt_succeeds(self):
+        attempt_model = self.env["pos.opay.payment.attempt"]
+        self.assertTrue(attempt_model._check_company_auto)
+        for field_name in (
+            "payment_method_id",
+            "pos_session_id",
+            "pos_config_id",
+        ):
+            self.assertTrue(attempt_model._fields[field_name].check_company)
         self.assertEqual(self.attempt_a.company_id, self.company_a)
         self.assertEqual(self.attempt_a.payment_method_id, self.payment_method_a)
         self.assertEqual(self.attempt_a.pos_session_id, self.session_a)

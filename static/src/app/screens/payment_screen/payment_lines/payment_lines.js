@@ -13,8 +13,8 @@ const QUERYABLE_PAYMENT_STATUSES = new Set([
 export function isQueryableOpayPaymentLine(line) {
     return Boolean(
         line?.payment_method_id?.use_payment_terminal === "opay" &&
-            !line.isDone() &&
-            QUERYABLE_PAYMENT_STATUSES.has(line.getPaymentStatus())
+            !line.is_done() &&
+            QUERYABLE_PAYMENT_STATUSES.has(line.get_payment_status())
     );
 }
 

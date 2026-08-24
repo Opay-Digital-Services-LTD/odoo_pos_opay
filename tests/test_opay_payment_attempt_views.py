@@ -55,7 +55,7 @@ class TestOPayPaymentAttemptViews(TransactionCase):
         )
         self.assertEqual(menu.action, action)
         self.assertEqual(menu.parent_id, self.env.ref("point_of_sale.menu_point_of_sale"))
-        self.assertEqual(menu.group_ids, self.env.ref("base.group_erp_manager"))
+        self.assertEqual(menu.groups_id, self.env.ref("base.group_erp_manager"))
 
         self._view_root("pos_opay.pos_opay_payment_attempt_view_list", "list")
         self._view_root("pos_opay.pos_opay_payment_attempt_view_form", "form")
@@ -82,6 +82,28 @@ class TestOPayPaymentAttemptViews(TransactionCase):
         }
         self.assertTrue(search_fields <= self.SAFE_VIEW_FIELDS)
         self.assertFalse(search_fields & self.RESTRICTED_FIELDS)
+
+    def test_active_attempt_form_has_manager_status_check_action(self):
+        root = self._view_root(
+            "pos_opay.pos_opay_payment_attempt_view_form", "form"
+        )
+        buttons = root.xpath(
+            ".//button[@name='action_opay_check_payment_status']"
+        )
+
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(buttons[0].get("type"), "object")
+        self.assertIn("uncertain", buttons[0].get("invisible"))
+
+        raw_root = etree.fromstring(
+            self.env.ref(
+                "pos_opay.pos_opay_payment_attempt_view_form"
+            ).arch_db
+        )
+        raw_button = raw_root.xpath(
+            ".//button[@name='action_opay_check_payment_status']"
+        )[0]
+        self.assertEqual(raw_button.get("groups"), "base.group_erp_manager")
 
     def test_attempt_acl_remains_read_only(self):
         access = self.env.ref("pos_opay.access_pos_opay_payment_attempt_manager")

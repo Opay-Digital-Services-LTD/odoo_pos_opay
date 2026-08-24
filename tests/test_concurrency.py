@@ -5,6 +5,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from odoo import SUPERUSER_ID, api
+from odoo.api import Transaction
 from odoo.addons.pos_opay.models.opay_payment_attempt import (
     OPayWebhookValidationError,
 )
@@ -13,7 +14,6 @@ from odoo.addons.pos_opay.services.opay_api import (
     OPayCreatePaymentResult,
 )
 from odoo.modules.registry import DummyRLock, Registry
-from odoo.orm.environments import Transaction
 from odoo.service.model import retrying
 from odoo.tests.common import BaseCase, get_db_name, tagged
 

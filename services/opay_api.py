@@ -18,8 +18,12 @@ class OPayAPIError(OPayError):
 
     def __init__(self, code, message):
         self.code = code
-        self.opay_message = message
-        super().__init__(f"OPay rejected the request with code {code}: {message}")
+        safe_message = self._safe_protocol_message(message) or "Unspecified OPay error"
+        super().__init__(
+            f"OPay rejected the request with code {code}: {safe_message}",
+            opay_code=code,
+            opay_message=safe_message,
+        )
 
 
 class OPayConnectionError(OPayError):
@@ -50,10 +54,27 @@ class OPayHTTPError(OPayError):
         super().__init__(f"OPay returned HTTP status {status_code}.")
 
 
+class OPayOrderNotFoundError(OPayError):
+    """Exact live Query Order response confirming no OPay order exists."""
+
+    category = "order_not_found"
+
+    def __init__(self, code, message):
+        self.code = code
+        safe_message = self._safe_protocol_message(message) or "Order not found"
+        super().__init__(
+            f"OPay did not find the queried order (code {code}).",
+            reason_code="confirmed_order_not_found",
+            opay_code=code,
+            opay_message=safe_message,
+        )
+
+
 @dataclass(frozen=True)
 class OPayCreatePaymentResult:
     out_order_no: str
     order_no: str
+    message: str = ""
     accepted: bool = True
     status: str = "created"
     payment_completed: bool = False
@@ -72,6 +93,7 @@ class OPayClient:
     DEFAULT_READ_TIMEOUT = 10
     DEFAULT_ORDER_EXPIRE_TIME = 180
     NGN_QUANTUM = Decimal("0.01")
+    RESPONSE_MESSAGE_KEY = "_opay_response_message"
 
     def __init__(
         self,
@@ -171,19 +193,23 @@ class OPayClient:
             "sn": self.terminal_sn,
             "isSplit": self.IS_SPLIT,
         }
-        response_data = self._post(self.CREATE_PAYMENT_PATH, payload)
+        response = self._post(self.CREATE_PAYMENT_PATH, payload)
+        response_data = response["data"]
         if not isinstance(response_data, dict):
             raise OPayMalformedResponseError(
-                "OPay returned invalid Create Payment data."
+                "OPay returned invalid Create Payment data.",
+                reason_code="invalid_create_payment_data",
             )
         order_no = response_data.get("orderNo")
         if not isinstance(order_no, str) or not order_no.strip():
             raise OPayMalformedResponseError(
-                "OPay Create Payment did not return an order number."
+                "OPay Create Payment did not return an order number.",
+                reason_code="missing_create_order_no",
             )
         return OPayCreatePaymentResult(
             out_order_no=out_order_no,
             order_no=order_no.strip(),
+            message=OPayError._safe_protocol_message(response["message"]) or "",
         )
 
     def query_payment(self, *, out_order_no=None, order_no=None):
@@ -203,10 +229,19 @@ class OPayClient:
         if order_no:
             payload["orderNo"] = order_no
 
-        response_data = self._post(self.QUERY_PAYMENT_PATH, payload)
+        response = self._post(self.QUERY_PAYMENT_PATH, payload)
+        response_data = response["data"]
         if not isinstance(response_data, dict):
-            raise OPayMalformedResponseError("OPay returned invalid Query Order data.")
-        return response_data
+            raise OPayMalformedResponseError(
+                "OPay returned invalid Query Order data.",
+                reason_code="invalid_query_order_data",
+            )
+        return {
+            **response_data,
+            self.RESPONSE_MESSAGE_KEY: (
+                OPayError._safe_protocol_message(response["message"]) or ""
+            ),
+        }
 
     @classmethod
     def normalize_amount(cls, amount):
@@ -262,8 +297,17 @@ class OPayClient:
             response_envelope = response.json()
         except (requests.JSONDecodeError, ValueError) as error:
             raise OPayMalformedResponseError(
-                "OPay returned a malformed JSON response."
+                "OPay returned a malformed JSON response.",
+                reason_code="malformed_json_response",
             ) from error
+
+        if path == self.QUERY_PAYMENT_PATH and self._is_order_not_found_response(
+            response_envelope
+        ):
+            raise OPayOrderNotFoundError(
+                response_envelope["code"],
+                response_envelope["message"],
+            )
 
         authenticated_response = self.auth.process_response(response_envelope)
         if authenticated_response["code"] != "00000":
@@ -271,7 +315,21 @@ class OPayClient:
                 authenticated_response["code"],
                 authenticated_response["message"],
             )
-        return authenticated_response["data"]
+        return authenticated_response
+
+    @staticmethod
+    def _is_order_not_found_response(response):
+        if not isinstance(response, dict):
+            return False
+        if set(response) != {"code", "message", "data"}:
+            return False
+        message = OPayError._safe_protocol_message(response.get("message"))
+        return (
+            response.get("code") in {"00003", "50002"}
+            and message is not None
+            and message.casefold() == "order not exist"
+            and response.get("data") is None
+        )
 
     @staticmethod
     def _required_text(value, label):

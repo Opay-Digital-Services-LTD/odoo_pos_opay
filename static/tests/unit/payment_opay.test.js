@@ -1,986 +1,421 @@
-import { animationFrame, expect, test, waitUntil } from "@odoo/hoot";
-import { Deferred, advanceTime } from "@odoo/hoot-mock";
-import { click, queryAll, queryOne } from "@odoo/hoot-dom";
-import {
-    mountWithCleanup,
-    onRpc,
-    patchWithCleanup,
-} from "@web/../tests/web_test_helpers";
-import { PaymentInterface } from "@point_of_sale/app/utils/payment/payment_interface";
-import { PosStore } from "@point_of_sale/app/services/pos_store";
+import { expect, test } from "@odoo/hoot";
+import { advanceTime, Deferred } from "@odoo/hoot-mock";
+import { PaymentInterface } from "@point_of_sale/app/payment/payment_interface";
+import { PosPayment } from "@point_of_sale/app/models/pos_payment";
 import { PaymentScreen } from "@point_of_sale/app/screens/payment_screen/payment_screen";
+import { PaymentScreenPaymentLines } from "@point_of_sale/app/screens/payment_screen/payment_lines/payment_lines";
+import { PosStore } from "@point_of_sale/app/store/pos_store";
 import { PaymentOpay } from "@pos_opay/app/utils/payment/payment_opay";
+import { isQueryableOpayPaymentLine } from "@pos_opay/app/screens/payment_screen/payment_lines/payment_lines";
+import "@pos_opay/app/screens/payment_screen/payment_screen";
 import "@pos_opay/app/services/pos_store";
-import "@pos_opay/app/screens/payment_screen/payment_lines/payment_lines";
-import { definePosModels } from "@point_of_sale/../tests/unit/data/generate_model_definitions";
-import { getFilledOrder, setupPosEnv } from "@point_of_sale/../tests/unit/utils";
+import {
+    correlatedResponse,
+    makeOpayHarness,
+} from "@pos_opay/../tests/unit/data/pos_payment_method.data";
 
-definePosModels();
+const tick = () => Promise.resolve();
 
-test("registers and instantiates the OPay payment interface", async () => {
-    const store = await setupPosEnv();
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const nonOpayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => !paymentMethod.use_payment_terminal
-    );
+function makePaymentLinesComponent() {
+    const component = Object.create(PaymentScreenPaymentLines.prototype);
+    component.opayStatusChecks = {};
+    component.opayStatusCooldownTimers = {};
+    return component;
+}
 
+function makePaymentScreen(harness, resetCounter = { count: 0 }) {
+    return {
+        paymentLines: harness.order.payment_ids,
+        currentOrder: harness.order,
+        numberBuffer: { reset: () => resetCounter.count++ },
+    };
+}
+
+test("registers OPay through the native Odoo 18 PaymentInterface registry", () => {
+    const harness = makeOpayHarness();
     expect(PosStore.prototype.electronic_payment_interfaces.opay).toBe(PaymentOpay);
-    expect(opayPaymentMethod.payment_terminal).toBeInstanceOf(PaymentOpay);
-    expect(
-        PaymentInterface.prototype.isPrototypeOf(opayPaymentMethod.payment_terminal)
-    ).toBe(true);
-    expect(nonOpayPaymentMethod.payment_terminal).toBe(undefined);
-    expect(store.recoverOpayPayments).toBe(undefined);
+    expect(harness.paymentMethod.payment_terminal).toBeInstanceOf(PaymentOpay);
+    expect(PaymentInterface.prototype.isPrototypeOf(PaymentOpay.prototype)).toBe(true);
+    expect(PaymentOpay.prototype.send_payment_request).toBeDefined();
+    expect(PaymentOpay.prototype.send_payment_cancel).toBeDefined();
 });
 
-test("accepted backend request never schedules an automatic status query", async () => {
-    const notifications = [];
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    let statusCalls = 0;
-    patchWithCleanup(store.notification, {
-        add(message, options) {
-            notifications.push({ message, options });
-        },
-    });
-    onRpc("pos.payment.method", "opay_create_payment_request", ({ args }) => {
+test("native PosPayment.pay invokes send_payment_request with the exact UUID", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    harness.rpcHandlers.opay_create_payment_request = (args) => {
         expect(args).toEqual([
-            [opayPaymentMethod.id],
-            {
-                reference: paymentLine.uuid,
-                amount: paymentLine.getAmount(),
-                session_id: store.session.id,
-            },
+            [harness.paymentMethod.id],
+            { reference: line.uuid, amount: line.get_amount(), session_id: harness.pos.session.id },
         ]);
-        return {
-            success: true,
-            status: "waiting",
-            message: "OPay accepted the payment request. Waiting for customer payment.",
-            reference: paymentLine.uuid,
-            out_order_no: "96BE4F0148E441F6B6EBF0638D5D8E6D",
-            order_no: "OPAY-ORDER-1",
-            payment_completed: false,
-            ambiguous: false,
-            reused: false,
-            recovery_delay_ms: 600000,
-        };
-    });
-    onRpc("pos.payment.method", "opay_get_payment_status", () => {
-        statusCalls++;
-        throw new Error("An automatic status query must never run");
-    });
-
-    const paymentResult = paymentLine.pay();
-    await waitUntil(() => paymentLine.getPaymentStatus() === "waitingCard");
-
-    expect(paymentLine.isDone()).toBe(false);
-    expect(order.finalized).toBe(false);
-    expect(paymentLine.payment_ref_no).toBe("96BE4F0148E441F6B6EBF0638D5D8E6D");
-    expect(paymentLine.transaction_id).toBe("OPAY-ORDER-1");
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0].message).toInclude("Waiting for customer payment");
-    expect(notifications[0].options.type).toBe("warning");
-    await advanceTime(600000);
-    expect(statusCalls).toBe(0);
-
-    opayPaymentMethod.payment_terminal.handleOpayStatusResponse({
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: paymentLine.payment_ref_no,
-        order_no: paymentLine.transaction_id,
-        status: "SUCCESS",
-        message: "OPay confirmed the payment successfully.",
-        payment_completed: true,
-    });
-    await expect(paymentResult).resolves.toBe(true);
-    expect(paymentLine.getPaymentStatus()).toBe("done");
-});
-
-test("backend rejection moves the payment to retry and informs the cashier", async () => {
-    const notifications = [];
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    patchWithCleanup(store.notification, {
-        add(message, options) {
-            notifications.push({ message, options });
-        },
-    });
-    onRpc("pos.payment.method", "opay_create_payment_request", () => ({
-        success: false,
-        status: "failed",
-        message: "OPay rejected the payment request.",
-        reference: paymentLine.uuid,
-        out_order_no: "96BE4F0148E441F6B6EBF0638D5D8E6D",
-        order_no: false,
-        payment_completed: false,
-        ambiguous: false,
-        reused: false,
-    }));
-
-    const result = await paymentLine.pay();
-
-    expect(result).toBe(false);
-    expect(paymentLine.getPaymentStatus()).toBe("retry");
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0].message).toBe("OPay rejected the payment request.");
-    expect(notifications[0].options.type).toBe("danger");
-});
-
-test("ambiguous Create Payment outcome remains waiting and cannot complete the order", async () => {
-    const notifications = [];
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    patchWithCleanup(store.notification, {
-        add(message, options) {
-            notifications.push({ message, options });
-        },
-    });
-    onRpc("pos.payment.method", "opay_create_payment_request", () => ({
-        success: false,
-        status: "uncertain",
-        message:
-            "OPay may have received this payment request. Keep it waiting and do not resend it.",
-        reference: paymentLine.uuid,
-        out_order_no: "96BE4F0148E441F6B6EBF0638D5D8E6D",
-        order_no: false,
-        payment_completed: false,
-        ambiguous: true,
-        reused: false,
-        recovery_delay_ms: 600000,
-    }));
-
-    const paymentResult = paymentLine.pay();
-    await waitUntil(() => paymentLine.getPaymentStatus() === "waitingCard");
-
-    expect(paymentLine.isDone()).toBe(false);
-    expect(order.finalized).toBe(false);
-    expect(paymentLine.payment_ref_no).toBe("96BE4F0148E441F6B6EBF0638D5D8E6D");
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0].message).toInclude("do not resend");
-    expect(notifications[0].options.type).toBe("warning");
-
-    opayPaymentMethod.payment_terminal.handleOpayStatusResponse({
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: paymentLine.payment_ref_no,
-        order_no: false,
-        status: "CLOSE",
-        message: "The OPay payment expired.",
-        payment_completed: false,
-    });
-    await expect(paymentResult).resolves.toBe(false);
-    expect(paymentLine.getPaymentStatus()).toBe("retry");
-});
-
-test("missing local attempt remains uncertain when OPay absence is not authoritative", async () => {
-    const notifications = [];
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    let recoveryCalls = 0;
-    patchWithCleanup(store.notification, {
-        add(message, options) {
-            notifications.push({ message, options });
-        },
-    });
-    onRpc("pos.payment.method", "opay_create_payment_request", () => {
-        throw new Error("internal details must not reach the cashier");
-    });
-    onRpc("pos.payment.method", "opay_resolve_create_outcome", ({ args }) => {
-        recoveryCalls++;
-        expect(args).toEqual([
-            [opayPaymentMethod.id],
-            { reference: paymentLine.uuid, session_id: store.session.id },
-        ]);
-        return {
-            success: false,
-            status: "uncertain",
-            message:
-                "The OPay payment could not be verified. Do not start another OPay payment.",
-            payment_method_id: opayPaymentMethod.id,
-            pos_session_id: store.session.id,
-            reference: paymentLine.uuid,
-            out_order_no: "96BE4F0148E441F6B6EBF0638D5D8E6D",
-            order_no: false,
-            payment_completed: false,
-            safe_to_retry: false,
-            local_attempt_missing: true,
-            recovery_state: "opay_query_uncertain",
-            recovery_delay_ms: 600000,
-        };
-    });
-
-    const paymentResult = paymentLine.pay();
-    await waitUntil(() => paymentLine.getPaymentStatus() === "waitingCard");
-    await animationFrame();
-
-    expect(recoveryCalls).toBe(0);
-    expect(paymentLine.payment_ref_no).toBeFalsy();
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    expect(paymentLine.isDone()).toBe(false);
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0].message).toInclude("Do not start another OPay payment");
-    expect(notifications[0].message).not.toInclude("internal details");
-    expect(notifications[0].options.type).toBe("warning");
-    await opayPaymentMethod.payment_terminal.checkPaymentStatus(paymentLine.uuid);
-    expect(recoveryCalls).toBe(1);
-    expect(paymentLine.payment_ref_no).toBe(
-        "96BE4F0148E441F6B6EBF0638D5D8E6D"
-    );
-    opayPaymentMethod.payment_terminal.handleOpayStatusResponse({
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: paymentLine.payment_ref_no,
-        status: "CANCEL",
-        message: "Test cleanup",
-        payment_completed: false,
-    });
-    await expect(paymentResult).resolves.toBe(false);
-});
-
-test("Create RPC failure recovers an existing pending attempt without another Create", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    let createCalls = 0;
-    let recoveryCalls = 0;
-    onRpc("pos.payment.method", "opay_create_payment_request", () => {
-        createCalls++;
-        throw new Error("browser response lost");
-    });
-    onRpc("pos.payment.method", "opay_resolve_create_outcome", ({ args }) => {
-        recoveryCalls++;
-        expect(args[1]).toEqual({
-            reference: paymentLine.uuid,
-            session_id: store.session.id,
-        });
-        return {
-            success: false,
-            status: "PENDING",
-            message: "The OPay payment is still pending on the terminal.",
-            payment_method_id: opayPaymentMethod.id,
-            pos_session_id: store.session.id,
-            reference: paymentLine.uuid,
-            out_order_no: "EXISTING-OUT-ORDER",
-            order_no: "EXISTING-OPAY-ORDER",
-            payment_completed: false,
-            safe_to_retry: false,
-            recovery_delay_ms: 600000,
-        };
-    });
-
-    const paymentResult = paymentLine.pay();
-    await waitUntil(() => paymentLine.getPaymentStatus() === "waitingCard");
-    await animationFrame();
-
-    expect(createCalls).toBe(1);
-    expect(recoveryCalls).toBe(0);
-    expect(paymentLine.payment_ref_no).toBeFalsy();
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    expect(paymentLine.isDone()).toBe(false);
-    await opayPaymentMethod.payment_terminal.checkPaymentStatus(paymentLine.uuid);
-    expect(recoveryCalls).toBe(1);
-    expect(paymentLine.payment_ref_no).toBe("EXISTING-OUT-ORDER");
-    expect(createCalls).toBe(1);
-    opayPaymentMethod.payment_terminal.handleOpayStatusResponse({
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: "EXISTING-OUT-ORDER",
-        order_no: "EXISTING-OPAY-ORDER",
-        status: "CANCEL",
-        message: "The OPay payment was cancelled.",
-        payment_completed: false,
-    });
-    await expect(paymentResult).resolves.toBe(false);
-});
-
-test("Create RPC failure can recover SUCCESS for the exact payment line", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    onRpc("pos.payment.method", "opay_create_payment_request", () => {
-        throw new Error("browser response lost");
-    });
-    onRpc("pos.payment.method", "opay_resolve_create_outcome", () => ({
-        success: true,
-        status: "SUCCESS",
-        message: "OPay confirmed the payment successfully.",
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: "EXISTING-OUT-ORDER",
-        order_no: "EXISTING-OPAY-ORDER",
-        payment_completed: true,
-        safe_to_retry: false,
-    }));
-
-    const paymentResult = paymentLine.pay();
-    await waitUntil(() => paymentLine.getPaymentStatus() === "waitingCard");
-    await opayPaymentMethod.payment_terminal.checkPaymentStatus(paymentLine.uuid);
-    await expect(paymentResult).resolves.toBe(true);
-    expect(paymentLine.getPaymentStatus()).toBe("done");
-    expect(paymentLine.payment_ref_no).toBe("EXISTING-OUT-ORDER");
-});
-
-test("failed Create-outcome recovery remains unresolved and never permits retry", async () => {
-    const notifications = [];
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    let recoveryCalls = 0;
-    patchWithCleanup(store.notification, {
-        add(message, options) {
-            notifications.push({ message, options });
-        },
-    });
-    onRpc("pos.payment.method", "opay_create_payment_request", () => {
-        throw new Error("browser response lost");
-    });
-    onRpc("pos.payment.method", "opay_resolve_create_outcome", () => {
-        recoveryCalls++;
-        throw new Error("Odoo remains unreachable");
-    });
-
-    const paymentResult = paymentLine.pay();
-    await waitUntil(() => paymentLine.getPaymentStatus() === "waitingCard");
-    await animationFrame();
-
-    expect(recoveryCalls).toBe(0);
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    expect(paymentLine.isDone()).toBe(false);
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0].message).toInclude("Do not start another OPay payment");
-    await opayPaymentMethod.payment_terminal.checkPaymentStatus(paymentLine.uuid);
-    expect(recoveryCalls).toBe(1);
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    opayPaymentMethod.payment_terminal.handleOpayStatusResponse({
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        status: "CANCEL",
-        message: "Test cleanup",
-        payment_completed: false,
-    });
-    await expect(paymentResult).resolves.toBe(false);
-});
-
-test("uncertain Create-outcome recovery remains waiting", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    onRpc("pos.payment.method", "opay_create_payment_request", () => {
-        throw new Error("browser response lost");
-    });
-    onRpc("pos.payment.method", "opay_resolve_create_outcome", () => ({
-        success: false,
-        status: "uncertain",
-        message: "The existing OPay payment could not be verified.",
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: "EXISTING-OUT-ORDER",
-        order_no: false,
-        payment_completed: false,
-        safe_to_retry: false,
-        recovery_delay_ms: 600000,
-    }));
-
-    const paymentResult = paymentLine.pay();
-    await waitUntil(() => paymentLine.getPaymentStatus() === "waitingCard");
-    expect(paymentLine.payment_ref_no).toBeFalsy();
-    await opayPaymentMethod.payment_terminal.checkPaymentStatus(paymentLine.uuid);
-
-    expect(paymentLine.payment_ref_no).toBe("EXISTING-OUT-ORDER");
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    expect(paymentLine.isDone()).toBe(false);
-    opayPaymentMethod.payment_terminal.handleOpayStatusResponse({
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: "EXISTING-OUT-ORDER",
-        status: "FAIL",
-        message: "Test cleanup",
-        payment_completed: false,
-    });
-    await expect(paymentResult).resolves.toBe(false);
-});
-
-test("Create-outcome recovery reuses final negative handling", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    const terminal = opayPaymentMethod.payment_terminal;
-    let recoveredStatus = "FAIL";
-    onRpc("pos.payment.method", "opay_resolve_create_outcome", () => ({
-        success: false,
-        status: recoveredStatus,
-        message: `OPay returned ${recoveredStatus}.`,
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: "EXISTING-OUT-ORDER",
-        order_no: "EXISTING-OPAY-ORDER",
-        payment_completed: false,
-        safe_to_retry: true,
-    }));
-
-    for (const status of ["FAIL", "CLOSE", "CANCEL"]) {
-        recoveredStatus = status;
-        paymentLine.setPaymentStatus("waitingCard");
-        paymentLine.payment_ref_no = false;
-        paymentLine.transaction_id = false;
-        terminal.manualStatusCheckCooldowns[paymentLine.uuid] = 0;
-        await terminal.checkPaymentStatus(paymentLine.uuid);
-        expect(paymentLine.getPaymentStatus()).toBe("retry");
-        expect(paymentLine.isDone()).toBe(false);
-    }
-});
-
-test("WebSocket success completes the exact line after its resolver was lost", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    paymentLine.setPaymentStatus("waitingCard");
-    paymentLine.payment_ref_no = "EXACT-OUT-ORDER";
-    paymentLine.transaction_id = "EXACT-OPAY-ORDER";
-
-    const handled = store.handleOpayPaymentStatus({
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: "EXACT-OUT-ORDER",
-        order_no: "EXACT-OPAY-ORDER",
-        status: "SUCCESS",
-        message: "OPay confirmed the payment successfully.",
-        payment_completed: true,
-    });
-
-    expect(handled).toBe(true);
-    expect(paymentLine.getPaymentStatus()).toBe("done");
-    expect(paymentLine.isDone()).toBe(true);
-});
-
-test("a final notification arriving before the Create response is not lost", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    onRpc("pos.payment.method", "opay_create_payment_request", () => {
-        store.handleOpayPaymentStatus({
-            payment_method_id: opayPaymentMethod.id,
-            pos_session_id: store.session.id,
-            reference: paymentLine.uuid,
-            out_order_no: "FAST-OUT-ORDER",
-            order_no: "FAST-OPAY-ORDER",
-            status: "SUCCESS",
-            message: "OPay confirmed the payment successfully.",
-            payment_completed: true,
-        });
-        return {
-            success: true,
-            status: "waiting",
-            message: "Waiting for customer payment.",
-            reference: paymentLine.uuid,
-            out_order_no: "FAST-OUT-ORDER",
-            order_no: "FAST-OPAY-ORDER",
-            payment_completed: false,
-            recovery_delay_ms: 180000,
-        };
-    });
-
-    expect(await paymentLine.pay()).toBe(true);
-    expect(paymentLine.getPaymentStatus()).toBe("done");
-    expect(paymentLine.isDone()).toBe(true);
-});
-
-test("a notification for another session or reference cannot complete the line", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    paymentLine.setPaymentStatus("waitingCard");
-
-    const baseNotification = {
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: "EXACT-OUT-ORDER",
-        order_no: "EXACT-OPAY-ORDER",
-        status: "SUCCESS",
-        payment_completed: true,
+        return correlatedResponse(harness, line, { success: true, status: "waiting" });
     };
 
-    expect(
-        store.handleOpayPaymentStatus({
-            ...baseNotification,
-            pos_session_id: store.session.id + 1,
-        })
-    ).toBe(false);
-    expect(
-        store.handleOpayPaymentStatus({
-            ...baseNotification,
-            reference: "00000000-0000-0000-0000-000000000000",
-        })
-    ).toBe(false);
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    expect(paymentLine.isDone()).toBe(false);
+    const payment = PosPayment.prototype.pay.call(line);
+    await tick();
+    expect(harness.calls).toHaveLength(1);
+    expect(line.get_payment_status()).toBe("waitingCard");
+    expect(line.is_done()).toBe(false);
+    expect(line.payment_ref_no).toBe("EXACT-OUT-ORDER");
+    harness.paymentMethod.payment_terminal.handleOpayStatusResponse(
+        correlatedResponse(harness, line, { success: true, status: "SUCCESS", payment_completed: true })
+    );
+    await expect(payment).resolves.toBe(true);
 });
 
-test("cancellation does not query OPay and refuses to remove an unresolved payment", async () => {
-    const notifications = [];
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
+test("Create acceptance and orderNo remain waiting rather than paid", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    harness.rpcHandlers.opay_create_payment_request = () =>
+        correlatedResponse(harness, line, {
+            success: true,
+            status: "waiting",
+            order_no: "OPAY-CREATED-NOT-PAID",
+        });
+
+    const payment = line.pay();
+    await tick();
+    expect(line.transaction_id).toBe("OPAY-CREATED-NOT-PAID");
+    expect(line.get_payment_status()).toBe("waitingCard");
+    expect(line.is_done()).toBe(false);
+    expect(harness.calls.filter((call) => call.method === "opay_get_payment_status")).toHaveLength(0);
+    harness.paymentMethod.payment_terminal.handleOpayStatusResponse(
+        correlatedResponse(harness, line, { status: "CANCEL" })
     );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    paymentLine.setPaymentStatus("waitingCard");
-    paymentLine.payment_ref_no = "EXACT-OUT-ORDER";
-    let statusCalls = 0;
-    patchWithCleanup(store.notification, {
-        add(message, options) {
-            notifications.push({ message, options });
-        },
-    });
-    onRpc("pos.payment.method", "opay_get_payment_status", ({ args }) => {
-        statusCalls++;
-        expect(args).toEqual([
-            [opayPaymentMethod.id],
-            { reference: paymentLine.uuid, session_id: store.session.id },
-        ]);
-        return {
-            success: false,
-            status: "CANCEL",
-            message: "The OPay payment was cancelled by the operator.",
-            reference: paymentLine.uuid,
-            out_order_no: "EXACT-OUT-ORDER",
-            order_no: "EXACT-OPAY-ORDER",
-            payment_completed: false,
-            recovery_delay_ms: 15000,
+    await expect(payment).resolves.toBe(false);
+});
+
+test("a correlated Create rejection becomes retryable", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    harness.rpcHandlers.opay_create_payment_request = () =>
+        correlatedResponse(harness, line, { status: "failed", message: "OPay rejected." });
+    expect(await line.pay()).toBe(false);
+    expect(line.get_payment_status()).toBe("retry");
+    expect(harness.notifications.at(-1).options.type).toBe("danger");
+});
+
+test("technical Create uncertainty remains unresolved with no automatic Query or retry", async () => {
+    for (const failure of ["connection failure", "connect timeout", "read timeout", "lost RPC response"]) {
+        const harness = makeOpayHarness();
+        const line = harness.addPaymentLine();
+        harness.rpcHandlers.opay_create_payment_request = () => {
+            throw new Error(failure);
         };
-    });
-
-    expect(
-        await opayPaymentMethod.payment_terminal.sendPaymentCancel(
-            order,
-            paymentLine.uuid
-        )
-    ).toBe(false);
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    expect(paymentLine.isDone()).toBe(false);
-    expect(statusCalls).toBe(0);
-    expect(notifications.at(-1).message).toInclude("Check Payment Status");
-
-    let numberBufferResets = 0;
-    PaymentScreen.prototype.deletePaymentLine.call(
-        {
-            paymentLines: order.payment_ids,
-            currentOrder: order,
-            numberBuffer: {
-                reset() {
-                    numberBufferResets++;
-                },
-            },
-        },
-        paymentLine.uuid
-    );
-    await waitUntil(() => paymentLine.getPaymentStatus() === "waitingCard");
-    expect(order.payment_ids.includes(paymentLine)).toBe(true);
-    expect(numberBufferResets).toBe(0);
-    expect(statusCalls).toBe(0);
-
-    await opayPaymentMethod.payment_terminal.checkPaymentStatus(paymentLine.uuid);
-    expect(statusCalls).toBe(1);
-    expect(paymentLine.getPaymentStatus()).toBe("retry");
-    expect(notifications.at(-1).message).toInclude("cancelled");
-    expect(
-        await opayPaymentMethod.payment_terminal.sendPaymentCancel(
-            order,
-            paymentLine.uuid
-        )
-    ).toBe(true);
-    expect(statusCalls).toBe(1);
-});
-
-test("cancellation preserves unresolved and successful states and only releases final negatives", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    const terminal = opayPaymentMethod.payment_terminal;
-    let statusCalls = 0;
-    onRpc("pos.payment.method", "opay_get_payment_status", () => {
-        statusCalls++;
-        throw new Error("Cancel must not query OPay");
-    });
-
-    for (const status of ["waiting", "PENDING", "uncertain"]) {
-        paymentLine.setPaymentStatus("waitingCard");
-        terminal.handleOpayStatusResponse({
-            payment_method_id: opayPaymentMethod.id,
-            pos_session_id: store.session.id,
-            reference: paymentLine.uuid,
-            status,
-            payment_completed: false,
-        });
-        // Odoo changes the line to waitingCancel immediately before invoking
-        // the terminal interface.
-        paymentLine.setPaymentStatus("waitingCancel");
-        expect(await terminal.sendPaymentCancel(order, paymentLine.uuid)).toBe(false);
-        expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-        expect(paymentLine.isDone()).toBe(false);
+        line.pay();
+        await tick();
+        expect(line.get_payment_status()).toBe("waitingCard");
+        expect(line.is_done()).toBe(false);
+        await advanceTime(600000);
+        expect(harness.calls).toHaveLength(1);
+        expect(harness.calls[0].method).toBe("opay_create_payment_request");
     }
-
-    // A lost Create response has no provider reference, but cancellation must
-    // still preserve the unresolved line.
-    paymentLine.payment_ref_no = false;
-    paymentLine.transaction_id = false;
-    paymentLine.setPaymentStatus("waitingCancel");
-    expect(await terminal.sendPaymentCancel(order, paymentLine.uuid)).toBe(false);
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-
-    terminal.handleOpayStatusResponse({
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        status: "SUCCESS",
-        payment_completed: true,
-    });
-    expect(await terminal.sendPaymentCancel(order, paymentLine.uuid)).toBe(false);
-    expect(paymentLine.getPaymentStatus()).toBe("done");
-    expect(paymentLine.isDone()).toBe(true);
-
-    for (const status of ["FAIL", "CLOSE", "CANCEL"]) {
-        paymentLine.setPaymentStatus("waitingCard");
-        terminal.handleOpayStatusResponse({
-            payment_method_id: opayPaymentMethod.id,
-            pos_session_id: store.session.id,
-            reference: paymentLine.uuid,
-            status,
-            payment_completed: false,
-        });
-        expect(paymentLine.getPaymentStatus()).toBe("retry");
-        expect(await terminal.sendPaymentCancel(order, paymentLine.uuid)).toBe(true);
-        expect(paymentLine.getPaymentStatus()).toBe("retry");
-    }
-    expect(statusCalls).toBe(0);
 });
 
-test("Check Payment Status appears only for a waiting OPay attempt", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    paymentLine.setPaymentStatus("waitingCard");
-    paymentLine.payment_ref_no = "EXACT-OUT-ORDER";
+test("POS reload and reconnect expose no automatic OPay recovery hook", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    line.payment_ref_no = "EXACT-OUT-ORDER";
 
-    await mountWithCleanup(PaymentScreen, {
-        props: { orderUuid: order.uuid },
-    });
-    await animationFrame();
-    expect(queryAll(".o_pos_opay_check_status")).toHaveLength(1);
-
-    paymentLine.setPaymentStatus("done");
-    await animationFrame();
-    expect(queryAll(".o_pos_opay_check_status")).toHaveLength(0);
-
-    paymentLine.setPaymentStatus("waitingCard");
-    paymentLine.payment_ref_no = false;
-    await animationFrame();
-    expect(queryAll(".o_pos_opay_check_status")).toHaveLength(1);
+    expect(harness.pos.recoverOpayPayments).toBe(undefined);
+    expect(harness.paymentMethod.payment_terminal._scheduleRecovery).toBe(undefined);
+    await advanceTime(600000);
+    expect(harness.calls).toHaveLength(0);
 });
 
-test("Check Payment Status is absent for non-OPay payment lines", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const nonOpayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal !== "opay"
-    );
-    const paymentLine = order.addPaymentline(nonOpayPaymentMethod).data;
-    paymentLine.setPaymentStatus("waitingCard");
-    paymentLine.payment_ref_no = "NON-OPAY-REFERENCE";
-
-    await mountWithCleanup(PaymentScreen, {
-        props: { orderUuid: order.uuid },
-    });
-    await animationFrame();
-
-    expect(queryAll(".o_pos_opay_check_status")).toHaveLength(0);
-});
-
-test("manual status button queries once, shows loading, and applies cooldown", async () => {
-    const notifications = [];
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    paymentLine.setPaymentStatus("waitingCard");
-    paymentLine.payment_ref_no = "EXACT-OUT-ORDER";
-    paymentLine.transaction_id = "EXACT-OPAY-ORDER";
-    const statusResponse = new Deferred();
-    let statusCalls = 0;
-    let createCalls = 0;
-    patchWithCleanup(store.notification, {
-        add(message, options) {
-            notifications.push({ message, options });
-        },
-    });
-    onRpc("pos.payment.method", "opay_create_payment_request", () => {
-        createCalls++;
-        throw new Error("Check Status must never create a payment");
-    });
-    onRpc("pos.payment.method", "opay_get_payment_status", ({ args }) => {
-        statusCalls++;
+test("explicit Check Status resolves a lost Create without issuing Create again", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    harness.rpcHandlers.opay_create_payment_request = () => {
+        throw new Error("response lost");
+    };
+    harness.rpcHandlers.opay_resolve_create_outcome = (args) => {
         expect(args).toEqual([
-            [opayPaymentMethod.id],
-            { reference: paymentLine.uuid, session_id: store.session.id },
+            [harness.paymentMethod.id],
+            { reference: line.uuid, session_id: harness.pos.session.id },
         ]);
-        return statusResponse;
-    });
+        return correlatedResponse(harness, line, {
+            status: "PENDING",
+            out_order_no: "RECONSTRUCTED-STABLE-REFERENCE",
+        });
+    };
+    line.pay();
+    await tick();
+    await harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid);
+    expect(harness.calls.filter((call) => call.method === "opay_create_payment_request")).toHaveLength(1);
+    expect(harness.calls.filter((call) => call.method === "opay_resolve_create_outcome")).toHaveLength(1);
+    expect(line.payment_ref_no).toBe("RECONSTRUCTED-STABLE-REFERENCE");
+    expect(line.get_payment_status()).toBe("waitingCard");
+});
 
-    await mountWithCleanup(PaymentScreen, {
-        props: { orderUuid: order.uuid },
-    });
-    await animationFrame();
-    const firstClick = click(".o_pos_opay_check_status");
-    await waitUntil(() => statusCalls === 1);
+test("exact Query not-found releases a lost Create without issuing Create again", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    harness.rpcHandlers.opay_create_payment_request = () => {
+        throw new Error("response lost");
+    };
+    harness.rpcHandlers.opay_resolve_create_outcome = () =>
+        correlatedResponse(harness, line, {
+            status: "not_found",
+            safe_to_retry: true,
+            terminal_released: true,
+            message: "OPay response: order not exist",
+        });
 
-    expect(queryOne(".o_pos_opay_check_status").disabled).toBe(true);
-    expect(queryOne(".o_pos_opay_check_status").textContent).toInclude("Checking");
-    queryOne(".o_pos_opay_check_status").click();
-    expect(statusCalls).toBe(1);
-    expect(createCalls).toBe(0);
+    line.pay();
+    await tick();
+    await harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid);
 
-    statusResponse.resolve({
-        success: false,
-        status: "PENDING",
-        message: "The OPay payment is still pending on the terminal.",
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: paymentLine.payment_ref_no,
-        order_no: paymentLine.transaction_id,
-        payment_completed: false,
-        recovery_delay_ms: 15000,
-    });
-    await firstClick;
-    await waitUntil(
-        () => !queryOne(".o_pos_opay_check_status").textContent.includes("Checking")
+    expect(line.get_payment_status()).toBe("retry");
+    expect(harness.notifications.at(-1).message).toBe(
+        "OPay response: order not exist"
     );
+    expect(
+        harness.calls.filter((call) => call.method === "opay_create_payment_request")
+    ).toHaveLength(1);
+    expect(
+        harness.calls.filter((call) => call.method === "opay_resolve_create_outcome")
+    ).toHaveLength(1);
+});
 
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    expect(paymentLine.isDone()).toBe(false);
-    expect(notifications.at(-1).message).toInclude("still pending");
-    expect(queryOne(".o_pos_opay_check_status").disabled).toBe(true);
-    expect(statusCalls).toBe(1);
+test("manual status checks deduplicate in-flight requests and enforce cooldown", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    line.payment_ref_no = "EXACT-OUT-ORDER";
+    const response = new Deferred();
+    harness.rpcHandlers.opay_get_payment_status = () => response;
+
+    const first = harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid);
+    expect(await harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid)).toBe(false);
+    expect(harness.calls).toHaveLength(1);
+    response.resolve(correlatedResponse(harness, line));
+    await first;
+    expect(await harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid)).toBe(false);
     await advanceTime(4000);
-    await animationFrame();
-    expect(queryOne(".o_pos_opay_check_status").disabled).toBe(false);
+    harness.rpcHandlers.opay_get_payment_status = () => correlatedResponse(harness, line);
+    await harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid);
+    expect(harness.calls).toHaveLength(2);
 });
 
-test("manual status SUCCESS completes the exact payment line", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    paymentLine.setPaymentStatus("waitingCard");
-    paymentLine.payment_ref_no = "EXACT-OUT-ORDER";
-    paymentLine.transaction_id = "EXACT-OPAY-ORDER";
-    onRpc("pos.payment.method", "opay_get_payment_status", () => ({
-        success: true,
-        status: "SUCCESS",
-        message: "OPay confirmed the payment successfully.",
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: paymentLine.payment_ref_no,
-        order_no: paymentLine.transaction_id,
-        payment_completed: true,
-    }));
-
-    const response = await opayPaymentMethod.payment_terminal.checkPaymentStatus(
-        paymentLine.uuid
-    );
-
-    expect(response.status).toBe("SUCCESS");
-    expect(paymentLine.getPaymentStatus()).toBe("done");
-    expect(paymentLine.isDone()).toBe(true);
+test("manual PENDING and Query technical failure both preserve waiting", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    line.payment_ref_no = "EXACT-OUT-ORDER";
+    harness.rpcHandlers.opay_get_payment_status = () => correlatedResponse(harness, line);
+    await harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid);
+    expect(line.get_payment_status()).toBe("waitingCard");
+    await advanceTime(4000);
+    harness.rpcHandlers.opay_get_payment_status = () => {
+        throw new Error("network failure");
+    };
+    await harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid);
+    expect(line.get_payment_status()).toBe("waitingCard");
+    expect(harness.notifications.at(-1).message).toBe("Unable to verify the payment status. Please try again.");
 });
 
-test("manual status terminal failures reuse retry handling", async () => {
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    const terminal = opayPaymentMethod.payment_terminal;
-    paymentLine.payment_ref_no = "EXACT-OUT-ORDER";
-    paymentLine.transaction_id = "EXACT-OPAY-ORDER";
-    let queriedStatus = "FAIL";
-    onRpc("pos.payment.method", "opay_get_payment_status", () => ({
-        success: false,
-        status: queriedStatus,
-        message: `OPay returned ${queriedStatus}.`,
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: paymentLine.payment_ref_no,
-        order_no: paymentLine.transaction_id,
-        payment_completed: false,
-    }));
-
-    for (const status of ["FAIL", "CLOSE", "CANCEL"]) {
-        queriedStatus = status;
-        paymentLine.setPaymentStatus("waitingCard");
-        terminal.manualStatusCheckCooldowns[paymentLine.uuid] = 0;
-        const response = await terminal.checkPaymentStatus(paymentLine.uuid);
-        expect(response.status).toBe(status);
-        expect(paymentLine.getPaymentStatus()).toBe("retry");
-        expect(paymentLine.isDone()).toBe(false);
+test("manual SUCCESS completes while final negatives become retryable", async () => {
+    for (const status of ["SUCCESS", "FAIL", "CLOSE", "CANCEL"]) {
+        const harness = makeOpayHarness();
+        const line = harness.addPaymentLine();
+        line.set_payment_status("waitingCard");
+        line.payment_ref_no = "EXACT-OUT-ORDER";
+        harness.rpcHandlers.opay_get_payment_status = () =>
+            correlatedResponse(harness, line, {
+                success: status === "SUCCESS",
+                status,
+                payment_completed: status === "SUCCESS",
+            });
+        await harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid);
+        expect(line.get_payment_status()).toBe(status === "SUCCESS" ? "done" : "retry");
     }
 });
 
-test("manual status RPC failure remains waiting and shows a safe message", async () => {
-    const notifications = [];
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    paymentLine.setPaymentStatus("waitingCard");
-    paymentLine.payment_ref_no = "EXACT-OUT-ORDER";
-    patchWithCleanup(store.notification, {
-        add(message, options) {
-            notifications.push({ message, options });
-        },
-    });
-    onRpc("pos.payment.method", "opay_get_payment_status", () => {
-        throw new Error("private backend details");
-    });
-
-    const response = await opayPaymentMethod.payment_terminal.checkPaymentStatus(
-        paymentLine.uuid
-    );
-
-    expect(response).toBe(false);
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    expect(paymentLine.isDone()).toBe(false);
-    expect(notifications.at(-1).message).toBe(
-        "Unable to verify the payment status. Please try again."
-    );
-    expect(notifications.at(-1).message).not.toInclude("private backend details");
+test("Check Status visibility is restricted to unresolved OPay lines", () => {
+    const harness = makeOpayHarness();
+    const opayLine = harness.addPaymentLine();
+    const otherLine = harness.addPaymentLine(harness.nonOpayPaymentMethod);
+    for (const status of ["waitingCard", "waiting", "waitingCancel", "timeout"]) {
+        opayLine.set_payment_status(status);
+        expect(isQueryableOpayPaymentLine(opayLine)).toBe(true);
+    }
+    for (const status of ["done", "retry", "reversed", undefined]) {
+        opayLine.set_payment_status(status);
+        expect(isQueryableOpayPaymentLine(opayLine)).toBe(false);
+    }
+    otherLine.set_payment_status("waitingCard");
+    expect(isQueryableOpayPaymentLine(otherLine)).toBe(false);
 });
 
-test("manual status uncertain response remains waiting and shows safe feedback", async () => {
-    const notifications = [];
-    const store = await setupPosEnv();
-    const order = await getFilledOrder(store);
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
-    const paymentLine = order.addPaymentline(opayPaymentMethod).data;
-    paymentLine.setPaymentStatus("waitingCard");
-    paymentLine.payment_ref_no = "EXACT-OUT-ORDER";
-    patchWithCleanup(store.notification, {
-        add(message, options) {
-            notifications.push({ message, options });
-        },
-    });
-    onRpc("pos.payment.method", "opay_get_payment_status", () => ({
-        success: false,
-        status: "uncertain",
-        message: "The provider result could not be verified.",
-        payment_method_id: opayPaymentMethod.id,
-        pos_session_id: store.session.id,
-        reference: paymentLine.uuid,
-        out_order_no: paymentLine.payment_ref_no,
-        order_no: false,
-        payment_completed: false,
-        ambiguous: true,
-        recovery_delay_ms: 15000,
-    }));
-
-    const response = await opayPaymentMethod.payment_terminal.checkPaymentStatus(
-        paymentLine.uuid
-    );
-
-    expect(response.status).toBe("uncertain");
-    expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
-    expect(paymentLine.isDone()).toBe(false);
-    expect(notifications.at(-1).message).toBe(
-        "Unable to verify the payment status. Please try again."
-    );
+test("payment-lines button handler runs one manual Query and never Create", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    line.payment_ref_no = "EXACT-OUT-ORDER";
+    const component = makePaymentLinesComponent();
+    const response = new Deferred();
+    harness.rpcHandlers.opay_get_payment_status = () => response;
+    const first = component.checkOpayPaymentStatus(line);
+    expect(component.isCheckingOpayStatus(line)).toBe(true);
+    expect(await component.checkOpayPaymentStatus(line)).toBe(false);
+    response.resolve(correlatedResponse(harness, line));
+    await first;
+    expect(harness.calls.filter((call) => call.method === "opay_get_payment_status")).toHaveLength(1);
+    expect(harness.calls.filter((call) => call.method === "opay_create_payment_request")).toHaveLength(0);
+    await advanceTime(4000);
+    expect(component.isOpayStatusCheckDisabled(line)).toBe(false);
 });
 
-test("OPay configuration is absent from frontend payment-method data", async () => {
-    const store = await setupPosEnv();
-    const opayPaymentMethod = store.models["pos.payment.method"].find(
-        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
-    );
+test("cancel refuses unresolved states without Query and protects SUCCESS", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    const terminal = harness.paymentMethod.payment_terminal;
+    for (const status of ["waiting", "PENDING", "uncertain"]) {
+        line.set_payment_status("waitingCancel");
+        expect(await terminal.send_payment_cancel(harness.order, line.uuid)).toBe(false);
+        expect(line.get_payment_status()).toBe("waitingCard");
+    }
+    line.set_payment_status("done");
+    expect(await terminal.send_payment_cancel(harness.order, line.uuid)).toBe(false);
+    expect(line.get_payment_status()).toBe("done");
+    expect(harness.calls.filter((call) => call.method === "opay_get_payment_status")).toHaveLength(0);
+});
 
-    const serverOnlyFields = [
-        "opay_head_merchant_id",
-        "opay_merchant_id",
-        "opay_terminal_sn",
-        "opay_client_auth_key",
-        "opay_public_key",
-        "opay_merchant_private_key",
+test("cancel releases only final-negative lines", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    const terminal = harness.paymentMethod.payment_terminal;
+    for (const status of ["FAIL", "CLOSE", "CANCEL"]) {
+        line.set_payment_status("waitingCard");
+        terminal.handleOpayStatusResponse(correlatedResponse(harness, line, { status }));
+        expect(line.get_payment_status()).toBe("retry");
+        expect(await terminal.send_payment_cancel(harness.order, line.uuid)).toBe(true);
+    }
+});
+
+test("OPay deletion guard keeps unresolved lines when cancellation returns false", async () => {
+    for (const status of ["waiting", "waitingCard", "timeout"]) {
+        const harness = makeOpayHarness();
+        const line = harness.addPaymentLine();
+        line.set_payment_status(status);
+        const reset = { count: 0 };
+        harness.paymentMethod.payment_terminal.send_payment_cancel = () => Promise.resolve(false);
+        PaymentScreen.prototype.deletePaymentLine.call(makePaymentScreen(harness, reset), line.uuid);
+        await tick();
+        expect(harness.order.payment_ids).toInclude(line);
+        expect(reset.count).toBe(0);
+    }
+});
+
+test("OPay deletion guard preserves SUCCESS defensively", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("done");
+    const reset = { count: 0 };
+    PaymentScreen.prototype.deletePaymentLine.call(makePaymentScreen(harness, reset), line.uuid);
+    await tick();
+    expect(harness.order.payment_ids).toInclude(line);
+    expect(line.get_payment_status()).toBe("done");
+    expect(reset.count).toBe(0);
+});
+
+test("OPay deletion guard keeps an unresolved line when cancellation rejects", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    const reset = { count: 0 };
+    harness.paymentMethod.payment_terminal.send_payment_cancel = () => Promise.reject(new Error("cancel RPC failed"));
+    PaymentScreen.prototype.deletePaymentLine.call(makePaymentScreen(harness, reset), line.uuid);
+    await tick();
+    await tick();
+    expect(harness.order.payment_ids).toInclude(line);
+    expect(line.get_payment_status()).toBe("waitingCard");
+    expect(reset.count).toBe(0);
+});
+
+test("OPay final-negative deletion and non-OPay native deletion both proceed", async () => {
+    const opay = makeOpayHarness();
+    const opayLine = opay.addPaymentLine();
+    opayLine.set_payment_status("retry");
+    const opayReset = { count: 0 };
+    PaymentScreen.prototype.deletePaymentLine.call(makePaymentScreen(opay, opayReset), opayLine.uuid);
+    expect(opay.order.payment_ids).not.toInclude(opayLine);
+    expect(opayReset.count).toBe(1);
+
+    const other = makeOpayHarness();
+    const otherLine = other.addPaymentLine(other.nonOpayPaymentMethod);
+    otherLine.set_payment_status("waitingCard");
+    const otherReset = { count: 0 };
+    other.nonOpayPaymentMethod.payment_terminal.send_payment_cancel = () => Promise.resolve(false);
+    PaymentScreen.prototype.deletePaymentLine.call(makePaymentScreen(other, otherReset), otherLine.uuid);
+    await tick();
+    expect(other.order.payment_ids).not.toInclude(otherLine);
+    expect(otherReset.count).toBe(1);
+});
+
+test("matching WebSocket event updates only the exact OPay line", () => {
+    const harness = makeOpayHarness();
+    const target = harness.addPaymentLine();
+    const other = harness.addPaymentLine();
+    target.set_payment_status("waitingCard");
+    other.set_payment_status("waitingCard");
+    target.payment_ref_no = "TARGET-OUT";
+    other.payment_ref_no = "OTHER-OUT";
+    expect(harness.pos.handleOpayPaymentStatus(correlatedResponse(harness, target, {
+        success: true, status: "SUCCESS", out_order_no: "TARGET-OUT", payment_completed: true,
+    }))).toBe(true);
+    expect(target.get_payment_status()).toBe("done");
+    expect(other.get_payment_status()).toBe("waitingCard");
+});
+
+test("WebSocket rejects another session, payment method, or reference", () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    const base = correlatedResponse(harness, line, { success: true, status: "SUCCESS", payment_completed: true });
+    expect(harness.pos.handleOpayPaymentStatus({ ...base, pos_session_id: 999 })).toBe(false);
+    expect(harness.pos.handleOpayPaymentStatus({ ...base, payment_method_id: 999 })).toBe(false);
+    expect(harness.pos.handleOpayPaymentStatus({ ...base, reference: "other-reference" })).toBe(false);
+    expect(line.get_payment_status()).toBe("waitingCard");
+});
+
+test("duplicate SUCCESS is idempotent and conflicting finals cannot downgrade it", () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    const success = correlatedResponse(harness, line, { success: true, status: "SUCCESS", payment_completed: true });
+    expect(harness.paymentMethod.payment_terminal.handleOpayStatusResponse(success)).toBe(true);
+    expect(harness.paymentMethod.payment_terminal.handleOpayStatusResponse(success)).toBe(true);
+    for (const status of ["FAIL", "CLOSE", "CANCEL"]) {
+        expect(harness.paymentMethod.payment_terminal.handleOpayStatusResponse({
+            ...success, success: false, status, payment_completed: false,
+        })).toBe(false);
+        expect(line.get_payment_status()).toBe("done");
+    }
+});
+
+test("PENDING followed by SUCCESS completes and PENDING alone never completes", () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    harness.paymentMethod.payment_terminal.handleOpayStatusResponse(correlatedResponse(harness, line));
+    expect(line.get_payment_status()).toBe("waitingCard");
+    expect(line.is_done()).toBe(false);
+    harness.paymentMethod.payment_terminal.handleOpayStatusResponse(
+        correlatedResponse(harness, line, { success: true, status: "SUCCESS", payment_completed: true })
+    );
+    expect(line.get_payment_status()).toBe("done");
+});
+
+test("frontend payment-method data contains no OPay credentials", () => {
+    const harness = makeOpayHarness();
+    for (const field of [
+        "opay_head_merchant_id", "opay_merchant_id", "opay_terminal_sn",
+        "opay_client_auth_key", "opay_public_key", "opay_merchant_private_key",
         "opay_sub_scene_enum",
-    ];
-    for (const fieldName of serverOnlyFields) {
-        expect(opayPaymentMethod[fieldName]).toBe(undefined);
+    ]) {
+        expect(harness.paymentMethod[field]).toBe(undefined);
     }
 });

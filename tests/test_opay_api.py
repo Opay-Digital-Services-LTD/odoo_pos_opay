@@ -13,6 +13,7 @@ from odoo.addons.pos_opay.services.opay_api import (
     OPayConnectTimeoutError,
     OPayConnectionError,
     OPayHTTPError,
+    OPayOrderNotFoundError,
     OPayReadTimeoutError,
 )
 from odoo.addons.pos_opay.services.opay_auth import (
@@ -106,6 +107,7 @@ class TestOPayClient(TransactionCase):
         self.assertEqual(result.status, "created")
         self.assertFalse(result.payment_completed)
         self.assertEqual(result.order_no, "OPAY-ORDER-1")
+        self.assertEqual(result.message, "SUCCESSFUL")
 
     def test_query_payment_constructs_documented_identifiers(self):
         expected_response = {
@@ -135,7 +137,13 @@ class TestOPayClient(TransactionCase):
                 "orderNo": "OPAY-ORDER-1",
             },
         )
-        self.assertEqual(result, expected_response)
+        self.assertEqual(
+            result,
+            {
+                **expected_response,
+                OPayClient.RESPONSE_MESSAGE_KEY: "SUCCESSFUL",
+            },
+        )
 
     def test_query_payment_requires_at_least_one_reference(self):
         with self.assertRaises(OPayConfigurationError):
@@ -241,7 +249,66 @@ class TestOPayClient(TransactionCase):
             self.client.query_payment(out_order_no="ODOO-PAYMENT-1")
 
         self.assertEqual(error.exception.category, "malformed_response")
+        self.assertEqual(error.exception.reason_code, "malformed_json_response")
         self.assertNotIn("secret", str(error.exception))
+
+    def test_live_query_order_not_found_responses_are_recognized(self):
+        for code in ("00003", "50002"):
+            with self.subTest(code=code):
+                response = Mock(status_code=200)
+                response.json.return_value = {
+                    "code": code,
+                    "message": "order not exist",
+                    "data": None,
+                }
+                self.http_session.post.reset_mock()
+                self.http_session.post.return_value = response
+
+                with self.assertRaises(OPayOrderNotFoundError) as error:
+                    self.client.query_payment(out_order_no="ODOO-PAYMENT-1")
+
+                self.assertEqual(error.exception.category, "order_not_found")
+                self.assertEqual(
+                    error.exception.reason_code, "confirmed_order_not_found"
+                )
+                self.assertEqual(error.exception.opay_code, code)
+                self.assertEqual(error.exception.opay_message, "order not exist")
+                self.http_session.post.assert_called_once()
+
+    def test_order_not_found_exception_is_query_only_and_exact(self):
+        near_misses = (
+            {
+                "code": "50002",
+                "message": "order not exist",
+                "data": None,
+                "unexpected": "field",
+            },
+            {"code": "50002", "message": "different error", "data": None},
+            {"code": "50003", "message": "order not exist", "data": None},
+            {"code": "50002", "message": "order not exist", "data": {}},
+        )
+        for response_body in near_misses:
+            with self.subTest(response=response_body):
+                response = Mock(status_code=200)
+                response.json.return_value = response_body
+                self.http_session.post.reset_mock()
+                self.http_session.post.return_value = response
+                with self.assertRaises(OPayMalformedResponseError):
+                    self.client.query_payment(out_order_no="ODOO-PAYMENT-1")
+
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "code": "50002",
+            "message": "order not exist",
+            "data": None,
+        }
+        self.http_session.post.return_value = response
+        with self.assertRaises(OPayMalformedResponseError):
+            self.client.create_payment(
+                out_order_no="ODOO-PAYMENT-1",
+                amount="100.00",
+                currency="NGN",
+            )
 
     def test_authenticated_but_malformed_business_data_is_rejected(self):
         self._set_response(["not", "query", "data"])

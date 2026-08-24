@@ -13,7 +13,7 @@ configuration files.
 
 `pos_opay` currently targets:
 
-- Odoo 19.0 Point of Sale;
+- Odoo 18.0 Point of Sale;
 - Nigeria;
 - NGN;
 - OPay's physical wireless POS terminal API;
@@ -21,8 +21,9 @@ configuration files.
 - `isSplit = N`;
 - one Odoo OPay payment method for one unique physical terminal serial number.
 
-Odoo 19 Community has been verified in the current environment. Odoo 19
-Enterprise is not yet verified.
+Odoo 18 Community clean installation, upgrade, backend tests, and POS asset
+loading have been verified. Odoo 18 Enterprise and physical-terminal acceptance
+are not yet verified.
 
 ## Values to request from OPay
 
@@ -112,8 +113,8 @@ The key must not be password-encrypted because the current server loader does
 not accept a private-key passphrase. Restrict access to the Odoo database,
 backups, ERP Manager accounts, and configuration exports accordingly.
 
-The password-style Odoo widget masks the field on screen; it is not encryption
-at rest.
+Password-style Odoo widgets mask the client authentication key, OPay public key,
+and merchant private key on screen; this masking is not encryption at rest.
 
 ## Configure Odoo
 
@@ -234,7 +235,9 @@ Each attempt stores safe correlation identifiers for support:
 
 ERP Managers can inspect these values through **Point of Sale -> OPay Payment
 Attempts**. The screen is read-only and does not expose credentials or allow a
-status to be forced.
+status to be forced. For an active attempt, **Check Payment Status** queries the
+already-existing OPay order and refreshes the read-only status and timestamps;
+it never creates another payment.
 
 For server logs, search for:
 
@@ -265,7 +268,8 @@ attempt is authoritatively reconciled.
 
 Before making broader public support claims, verify and record:
 
-- Odoo 19 Enterprise installation and complete POS flow;
+- Odoo 18 Enterprise installation and complete POS flow;
+- Odoo 18 physical-terminal Create Payment and final-status acceptance;
 - live OPay webhook delivery, response acknowledgement, and POS notification;
 - supported physical terminal models/firmware from OPay;
 - any OPay certification or production approval requirements;

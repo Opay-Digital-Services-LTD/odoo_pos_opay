@@ -5,13 +5,23 @@ from uuid import uuid4
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from psycopg2 import IntegrityError
 
 from odoo import fields
 from odoo.addons.pos_opay.controllers.main import PosOpayController
-from odoo.addons.pos_opay.services.opay_api import OPayClient, OPayHTTPError
-from odoo.addons.pos_opay.services.opay_auth import OPayAuth, OPayConfigurationError
-from odoo.exceptions import ValidationError
+from odoo.addons.pos_opay.services.opay_api import (
+    OPayClient,
+    OPayHTTPError,
+    OPayOrderNotFoundError,
+)
+from odoo.addons.pos_opay.services.opay_auth import (
+    OPayAuth,
+    OPayConfigurationError,
+    OPayMalformedResponseError,
+)
+from odoo.exceptions import AccessError, ValidationError
 from odoo.tests.common import TransactionCase, tagged
+from odoo.tools import mute_logger
 
 
 @tagged("post_install", "-at_install")
@@ -61,6 +71,64 @@ class TestOPayPaymentAttempt(TransactionCase):
                 "user_id": cls.env.user.id,
                 "state": "opened",
             }
+        )
+
+    def test_sql_constraint_rejects_duplicate_payment_reference(self):
+        attempt = self._attempt()
+        reference = str(uuid4())
+        attempt_model = self.env["pos.opay.payment.attempt"]
+        duplicate_values = attempt_model._new_attempt_values(
+            self.payment_method,
+            attempt.payment_reference,
+            reference.replace("-", "").upper(),
+            "100.00",
+            session=self.session,
+        )
+
+        with (
+            self.assertRaises(IntegrityError),
+            mute_logger("odoo.sql_db"),
+            self.env.cr.savepoint(),
+        ):
+            attempt_model.create(duplicate_values)
+
+        self.assertEqual(
+            attempt_model.search_count(
+                [("payment_reference", "=", attempt.payment_reference)]
+            ),
+            1,
+        )
+
+    def test_attempt_uses_a_merchant_facing_display_name(self):
+        attempt = self._attempt()
+
+        self.assertEqual(attempt.display_name, f"OPay Payment #{attempt.id}")
+        self.assertNotIn("pos.opay.payment.attempt", attempt.display_name)
+
+    def test_sql_constraint_rejects_duplicate_out_order_no(self):
+        attempt = self._attempt()
+        reference = str(uuid4())
+        attempt_model = self.env["pos.opay.payment.attempt"]
+        duplicate_values = attempt_model._new_attempt_values(
+            self.payment_method,
+            reference,
+            attempt.out_order_no,
+            "100.00",
+            session=self.session,
+        )
+
+        with (
+            self.assertRaises(IntegrityError),
+            mute_logger("odoo.sql_db"),
+            self.env.cr.savepoint(),
+        ):
+            attempt_model.create(duplicate_values)
+
+        self.assertEqual(
+            attempt_model.search_count(
+                [("out_order_no", "=", attempt.out_order_no)]
+            ),
+            1,
         )
 
     def test_valid_authenticated_success_webhook_and_duplicate_are_idempotent(self):
@@ -382,7 +450,11 @@ class TestOPayPaymentAttempt(TransactionCase):
     def test_query_pending_stays_active_and_success_completes_exact_attempt(self):
         attempt = self._attempt(status="uncertain")
         client = Mock(spec=OPayClient)
-        client.query_payment.return_value = self._result(attempt, "PENDING")
+        client.query_payment.return_value = self._result(
+            attempt,
+            "PENDING",
+            **{OPayClient.RESPONSE_MESSAGE_KEY: "payment still processing"},
+        )
 
         with patch.object(OPayClient, "from_payment_method", return_value=client):
             pending = attempt.query_opay_status(notify=False)
@@ -391,6 +463,7 @@ class TestOPayPaymentAttempt(TransactionCase):
 
         self.assertEqual(pending["status"], "PENDING")
         self.assertFalse(pending["terminal_released"])
+        self.assertIn("payment still processing", pending["message"])
         self.assertEqual(success["status"], "SUCCESS")
         self.assertTrue(success["payment_completed"])
         self.assertEqual(client.query_payment.call_count, 2)
@@ -419,6 +492,161 @@ class TestOPayPaymentAttempt(TransactionCase):
         )
         client.create_payment.assert_not_called()
         self.assertIn("error_category=http_error", logs.output[0])
+
+    def test_query_logs_safe_reason_for_untrusted_opay_error_response(self):
+        attempt = self._attempt(status="uncertain")
+        client = Mock(spec=OPayClient)
+        client.query_payment.side_effect = OPayMalformedResponseError(
+            "UNTRUSTED-RESPONSE-BODY-MUST-NOT-BE-LOGGED",
+            reason_code="untrusted_error_response",
+            opay_code="50099",
+        )
+
+        with self.assertLogs(
+            "odoo.addons.pos_opay.models.opay_payment_attempt", level="WARNING"
+        ) as logs, patch.object(
+            OPayClient, "from_payment_method", return_value=client
+        ):
+            response = attempt.query_opay_status(
+                notify=False,
+                reason="admin_manual_check",
+            )
+
+        self.assertEqual(attempt.status, "uncertain")
+        self.assertTrue(response["ambiguous"])
+        self.assertFalse(response["payment_completed"])
+        log_message = logs.output[0]
+        self.assertIn("outcome=uncertain", log_message)
+        self.assertIn("code=50099", log_message)
+        self.assertIn("error_category=malformed_response", log_message)
+        self.assertIn("error_reason=untrusted_error_response", log_message)
+        self.assertNotIn("UNTRUSTED-RESPONSE-BODY", log_message)
+        client.query_payment.assert_called_once_with(
+            out_order_no=attempt.out_order_no,
+            order_no=attempt.order_no,
+        )
+        client.create_payment.assert_not_called()
+
+    def test_confirmed_order_not_found_releases_existing_attempt(self):
+        for code in ("00003", "50002"):
+            with self.subTest(code=code):
+                attempt = self._attempt(status="uncertain")
+                client = Mock(spec=OPayClient)
+                client.query_payment.side_effect = OPayOrderNotFoundError(
+                    code, "order not exist"
+                )
+
+                with patch.object(
+                    OPayClient, "from_payment_method", return_value=client
+                ), patch.object(type(self.config), "_notify", autospec=True):
+                    response = attempt.query_opay_status(
+                        notify=True,
+                        reason="admin_manual_check",
+                    )
+
+                self.assertEqual(attempt.status, "failed")
+                self.assertTrue(attempt.finalized_at)
+                self.assertEqual(attempt.last_source, "query")
+                self.assertEqual(attempt.last_status_message, "order not exist")
+                self.assertFalse(response["payment_completed"])
+                self.assertFalse(response["ambiguous"])
+                self.assertTrue(response["terminal_released"])
+                self.assertIn("order not exist", response["message"])
+                client.create_payment.assert_not_called()
+
+    def test_order_not_found_cannot_downgrade_success(self):
+        attempt = self._attempt(status="SUCCESS")
+        finalized_at = attempt.finalized_at
+        response = attempt._apply_confirmed_order_not_found(
+            OPayOrderNotFoundError("50002", "order not exist"),
+            notify=False,
+            reason="admin_manual_check",
+            started_at=0,
+        )
+
+        self.assertEqual(attempt.status, "SUCCESS")
+        self.assertEqual(attempt.finalized_at, finalized_at)
+        self.assertTrue(response["payment_completed"])
+
+    def test_admin_manual_check_queries_existing_attempt_without_create(self):
+        attempt = self._attempt(status="uncertain")
+        client = Mock(spec=OPayClient)
+        client.query_payment.return_value = self._result(attempt, "CLOSE")
+
+        with patch.object(
+            OPayClient, "from_payment_method", return_value=client
+        ), patch.object(type(self.config), "_notify", autospec=True):
+            action = attempt.action_opay_check_payment_status()
+
+        self.assertEqual(attempt.status, "CLOSE")
+        self.assertEqual(action["type"], "ir.actions.client")
+        self.assertEqual(action["tag"], "display_notification")
+        self.assertEqual(action["params"]["type"], "danger")
+        self.assertTrue(action["params"]["sticky"])
+        self.assertEqual(
+            action["params"]["next"],
+            {
+                "type": "ir.actions.client",
+                "tag": "soft_reload",
+            },
+        )
+        client.query_payment.assert_called_once_with(
+            out_order_no=attempt.out_order_no,
+            order_no=attempt.order_no,
+        )
+        client.create_payment.assert_not_called()
+
+    def test_admin_manual_check_requires_erp_manager(self):
+        attempt = self._attempt(status="uncertain")
+        ordinary_user = self.env["res.users"].create(
+            {
+                "name": "OPay Status Viewer",
+                "login": "opay-status-viewer",
+                "groups_id": [(6, 0, [self.env.ref("base.group_user").id])],
+            }
+        )
+
+        with self.assertRaises(AccessError):
+            attempt.with_user(ordinary_user).action_opay_check_payment_status()
+
+    def test_admin_manual_check_can_finalize_without_granting_write_access(self):
+        attempt = self._attempt(status="uncertain")
+        manager = self.env["res.users"].create(
+            {
+                "name": "OPay Status Manager",
+                "login": "opay-status-manager",
+                "company_id": attempt.company_id.id,
+                "company_ids": [(6, 0, [attempt.company_id.id])],
+                "groups_id": [
+                    (
+                        6,
+                        0,
+                        [
+                            self.env.ref("base.group_user").id,
+                            self.env.ref("base.group_erp_manager").id,
+                        ],
+                    )
+                ],
+            }
+        )
+        client = Mock(spec=OPayClient)
+        client.query_payment.side_effect = OPayOrderNotFoundError(
+            "50002", "order not exist"
+        )
+
+        with patch.object(
+            OPayClient, "from_payment_method", return_value=client
+        ), patch.object(type(self.config), "_notify", autospec=True):
+            action = attempt.with_user(manager).action_opay_check_payment_status()
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertTrue(attempt.finalized_at)
+        self.assertEqual(action["tag"], "display_notification")
+        self.assertEqual(action["params"]["type"], "danger")
+        self.assertIn("order not exist", action["params"]["message"])
+        with self.assertRaises(AccessError):
+            attempt.with_user(manager).write({"status": "SUCCESS"})
+        client.create_payment.assert_not_called()
 
     def test_query_and_finalization_logs_include_reason_duration_and_no_secrets(self):
         attempt = self._attempt(status="uncertain")

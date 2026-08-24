@@ -4,9 +4,14 @@ import time
 from datetime import timedelta
 
 from odoo import _, api, fields, models
-from odoo.exceptions import ValidationError
+from odoo.exceptions import AccessError, ValidationError
 
-from ..services.opay_api import OPayAPIError, OPayClient, OPayConnectionError
+from ..services.opay_api import (
+    OPayAPIError,
+    OPayClient,
+    OPayConnectionError,
+    OPayOrderNotFoundError,
+)
 from ..services.opay_auth import (
     OPayAuth,
     OPayAuthenticationError,
@@ -57,6 +62,7 @@ class PosOpayPaymentAttempt(models.Model):
     _name = "pos.opay.payment.attempt"
     _description = "OPay POS Payment Attempt"
     _order = "id desc"
+    _rec_names_search = ["payment_reference", "out_order_no", "order_no"]
     _check_company_auto = True
 
     ACTIVE_STATUSES = {"creating", "waiting", "uncertain", "PENDING"}
@@ -110,14 +116,26 @@ class PosOpayPaymentAttempt(models.Model):
     )
     last_status_message = fields.Char(readonly=True)
 
-    _unique_payment_reference = models.Constraint(
-        "unique (payment_reference)",
-        "An OPay payment reference must identify exactly one attempt.",
-    )
-    _unique_out_order_no = models.Constraint(
-        "unique (out_order_no)",
-        "An OPay business order number must identify exactly one attempt.",
-    )
+    _sql_constraints = [
+        (
+            "unique_payment_reference",
+            "unique (payment_reference)",
+            "An OPay payment reference must identify exactly one attempt.",
+        ),
+        (
+            "unique_out_order_no",
+            "unique (out_order_no)",
+            "An OPay business order number must identify exactly one attempt.",
+        ),
+    ]
+
+    @api.depends("payment_reference")
+    def _compute_display_name(self):
+        for attempt in self:
+            attempt.display_name = _(
+                "OPay Payment #%(id)s",
+                id=attempt.id,
+            )
 
     @api.model
     def _new_attempt_values(
@@ -181,6 +199,13 @@ class PosOpayPaymentAttempt(models.Model):
                 out_order_no=self.out_order_no,
                 order_no=self.order_no or None,
             )
+        except OPayOrderNotFoundError as error:
+            return self._apply_confirmed_order_not_found(
+                error,
+                notify=notify,
+                reason=reason,
+                started_at=started_at,
+            )
         except OPayAPIError as error:
             self._log_query_event(
                 outcome="rejected",
@@ -207,6 +232,15 @@ class PosOpayPaymentAttempt(models.Model):
             OPayMalformedResponseError,
             OPayError,
         ) as error:
+            response_message = _(
+                "Unable to confirm the OPay payment status. The existing "
+                "payment remains active and was not resent."
+            )
+            response_message = self._append_opay_message(
+                response_message,
+                error.opay_message,
+                verified=False,
+            )
             self._log_query_event(
                 outcome="uncertain",
                 reason=reason,
@@ -214,12 +248,11 @@ class PosOpayPaymentAttempt(models.Model):
                 level=logging.WARNING,
                 error_type=type(error).__name__,
                 error_category=error.category,
+                error_reason=error.reason_code or "-",
+                code=error.opay_code or "-",
             )
             return self.frontend_response(
-                message=_(
-                    "Unable to confirm the OPay payment status. The existing "
-                    "payment remains active and was not resent."
-                ),
+                message=response_message,
                 ambiguous=True,
                 reused=True,
             )
@@ -249,6 +282,113 @@ class PosOpayPaymentAttempt(models.Model):
             level=logging.INFO,
         )
         return self.frontend_response(reused=True)
+
+    def _apply_confirmed_order_not_found(
+        self,
+        error,
+        *,
+        notify,
+        reason,
+        started_at,
+    ):
+        """Release only the exact live OPay Query Order not-found response."""
+        self.ensure_one()
+        self.env.cr.execute(
+            "SELECT id FROM pos_payment_method WHERE id = %s FOR UPDATE",
+            [self.payment_method_id.id],
+        )
+        self.env.cr.execute(
+            "SELECT id FROM pos_opay_payment_attempt WHERE id = %s FOR UPDATE",
+            [self.id],
+        )
+        self.invalidate_recordset()
+
+        if self.status in self.FINAL_STATUSES:
+            return self.frontend_response(reused=True)
+
+        self.write(
+            {
+                "status": "failed",
+                "last_source": "query",
+                "last_status_message": self._safe_message(error.opay_message),
+                "finalized_at": fields.Datetime.now(),
+            }
+        )
+        self.payment_method_id._opay_clear_latest_attempt(self)
+        if notify:
+            self._notify_pos()
+        self._log_query_event(
+            outcome="confirmed_absent",
+            reason=reason,
+            duration_ms=self._duration_ms(started_at),
+            level=logging.INFO,
+            error_type=type(error).__name__,
+            error_category=error.category,
+            error_reason=error.reason_code,
+            code=error.code,
+        )
+        return self.frontend_response(
+            message=self._append_opay_message(
+                _(
+                    "OPay confirmed that this payment order does not exist. "
+                    "The payment has been released and may be tried again."
+                ),
+                error.opay_message,
+            ),
+            ambiguous=False,
+            reused=True,
+        )
+
+    def action_opay_check_payment_status(self):
+        """Let an authorized backend manager query an orphaned active attempt."""
+        self.ensure_one()
+        if not self.env.user.has_group("base.group_erp_manager"):
+            raise AccessError(
+                _("Only an authorized Odoo administrator can check this payment status.")
+            )
+        # Keep the inspection model read-only for backend users.  Establish
+        # authorization and the active-company record-rule boundary before
+        # elevating only the trusted server-side status synchronization.
+        self.check_access("read")
+        attempt = self.sudo()
+
+        if attempt.status in attempt.ACTIVE_STATUSES:
+            # Preserve the global lock order used by Create, Query and webhook:
+            # payment method first, then the attempt during finalization.
+            attempt.env.cr.execute(
+                "SELECT id FROM pos_payment_method WHERE id = %s FOR UPDATE",
+                [attempt.payment_method_id.id],
+            )
+            attempt.invalidate_recordset()
+            response = attempt.query_opay_status(
+                notify=True,
+                reason="admin_manual_check",
+            )
+        else:
+            response = attempt.frontend_response(reused=True)
+
+        status = response["status"]
+        notification_type = (
+            "success"
+            if status == "SUCCESS"
+            else "danger"
+            if status in self.FINAL_STATUSES | {"failed"}
+            else "warning"
+        )
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("OPay Payment Status"),
+                "message": response["message"],
+                "type": notification_type,
+                "sticky": True,
+                "next": {
+                    "type": "ir.actions.client",
+                    "tag": "soft_reload",
+                },
+            },
+        }
 
     def apply_authenticated_result(
         self,
@@ -336,6 +476,7 @@ class PosOpayPaymentAttempt(models.Model):
         level,
         error_type="-",
         error_category="-",
+        error_reason="-",
         code="-",
     ):
         self.ensure_one()
@@ -344,7 +485,7 @@ class PosOpayPaymentAttempt(models.Model):
             "event=opay_query_order_api outcome=%s source=query reason=%s "
             "payment_method_id=%s attempt_id=%s reference=%s out_order_no=%s "
             "order_no=%s terminal_sn=%s status=%s error_type=%s code=%s "
-            "error_category=%s duration_ms=%s",
+            "error_category=%s error_reason=%s duration_ms=%s",
             outcome,
             reason,
             self.payment_method_id.id,
@@ -357,6 +498,7 @@ class PosOpayPaymentAttempt(models.Model):
             error_type,
             code,
             error_category,
+            error_reason,
             duration_ms,
         )
 
@@ -500,10 +642,19 @@ class PosOpayPaymentAttempt(models.Model):
                     attempt=self,
                 )
 
+        response_message = self._safe_message(
+            result.get(OPayClient.RESPONSE_MESSAGE_KEY)
+        )
+        payment_message = self._safe_message(result.get("errorMsg"))
+        messages = []
+        for message in (response_message, payment_message):
+            if message and message not in messages:
+                messages.append(message)
+
         return {
             "status": status,
             "order_no": order_no,
-            "message": self._safe_message(result.get("errorMsg")),
+            "message": "; ".join(messages) or False,
         }
 
     @api.model
@@ -676,11 +827,10 @@ class PosOpayPaymentAttempt(models.Model):
             "CLOSE": _("The OPay payment expired or was closed."),
             "CANCEL": _("The OPay payment was cancelled by the operator."),
         }
-        if self.last_status_message and self.status in {"FAIL", "CLOSE", "CANCEL"}:
-            status_messages[self.status] = _(
-                "%(message)s OPay response: %(opay_message)s",
-                message=status_messages[self.status],
-                opay_message=self.last_status_message,
+        if self.last_status_message:
+            status_messages[self.status] = self._append_opay_message(
+                status_messages[self.status],
+                self.last_status_message,
             )
         is_success = self.status == "SUCCESS"
         return {
@@ -714,3 +864,16 @@ class PosOpayPaymentAttempt(models.Model):
         if not isinstance(message, str):
             return False
         return " ".join(message.split())[:256] or False
+
+    @classmethod
+    def _append_opay_message(cls, message, opay_message, verified=True):
+        safe_message = cls._safe_message(opay_message)
+        if not safe_message:
+            return message
+        label = _("OPay response") if verified else _("Unverified OPay response")
+        return _(
+            "%(message)s %(label)s: %(opay_message)s",
+            message=message,
+            label=label,
+            opay_message=safe_message,
+        )

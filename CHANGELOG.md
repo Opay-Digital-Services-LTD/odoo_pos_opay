@@ -4,11 +4,35 @@ All notable changes to `pos_opay` are documented in this file. Versions follow
 Odoo's five-part addon versioning convention: the Odoo series followed by the
 addon release number.
 
-## [19.0.1.0.0]
+## [18.0.1.0.1]
+
+### Changed
+
+- Added safe backend **Check Payment Status** for active read-only payment
+  attempts, with a controller-level refresh that keeps the result notification
+  visible.
+- Recognized the two exact live OPay Query Order `order not exist` response
+  contracts observed for missing business/OPay order references; near-matching
+  responses continue to fail closed.
+- Included sanitized OPay response messages in cashier and administrator
+  feedback without exposing protocol payloads or credentials.
+- Added an Odoo 18-native password-style widget for all three RSA/authentication
+  configuration fields.
+- Added explicit external-service/data-transfer disclosure and aligned release
+  documentation with current Odoo Apps publication requirements.
+
+### Safety
+
+- A confirmed missing OPay order may be released for retry, while uncertain or
+  unauthenticated near-matches remain blocked.
+- Odoo 18-specific payment-line deletion protection retains unresolved and
+  successful OPay lines without changing non-OPay deletion behavior.
+
+## [18.0.1.0.0]
 
 ### Added
 
-- Native OPay physical-terminal registration in Odoo 19 Point of Sale.
+- Native OPay physical-terminal registration in Odoo 18 Point of Sale.
 - OPay payment-method configuration for Business ID, Branch ID, terminal serial
   number, `subSceneEnum`, `clientAuthKey`, OPay public key, and merchant private
   key.
@@ -59,12 +83,14 @@ addon release number.
 
 ### Known limitations
 
-- Only Odoo 19 Community has been verified; Enterprise compatibility is not yet
+- Odoo 18 Community clean installation, upgrade, backend tests, and POS assets
+  have been verified; Enterprise and physical-terminal acceptance are not yet
   verified.
 - Live payment operation is limited to NGN in Nigeria using an OPay-provisioned
   physical terminal enabled for the public wireless/offline POS API.
-- Live Create Payment and cashier-triggered Query Order have been verified;
-  end-to-end live OPay webhook delivery is not yet verified.
+- Automated Create Payment and cashier-triggered Query Order behavior have been
+  verified; physical-terminal acceptance and end-to-end live OPay webhook
+  delivery are not yet verified.
 - One OPay payment method maps to one unique terminal serial number. Shared
   terminals and split payments are not supported.
 - Refunds and reversals are not implemented because a supported OPay contract

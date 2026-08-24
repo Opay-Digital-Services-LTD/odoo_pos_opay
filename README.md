@@ -1,4 +1,4 @@
-# OPay POS Terminal for Odoo 19
+# OPay POS Terminal for Odoo 18
 
 `pos_opay` connects Odoo Point of Sale to a configured physical OPay terminal
 through OPay's public wireless POS API. When a cashier selects OPay, Odoo sends
@@ -13,20 +13,20 @@ general OPay ERP module.
 
 | Area | Current support statement |
 | --- | --- |
-| Odoo version | Odoo 19.0 only |
-| Odoo Community | Verified in the current Odoo 19 Community development environment |
+| Odoo version | Odoo 18.0 only |
+| Odoo Community | Clean installation, upgrade, backend suite, and POS asset loading verified on Odoo 18 Community |
 | Odoo Enterprise | Not yet verified |
 | Odoo Online (SaaS) | Not supported because the addon contains server-side Python code |
 | Odoo.sh | Not yet verified |
-| Earlier/later Odoo versions | Not yet verified; no compatibility claim is made |
+| Other Odoo versions | Use the separately maintained matching branch; this package supports Odoo 18 only |
 | Currency | NGN only |
 | Market | Nigeria only |
 | OPay integration | Physical OPay POS terminal through the public wireless/offline POS API |
 | Terminal assignment | One unique terminal serial number per OPay payment method |
 | Physical terminal | Required for live payments |
 | Terminal model/firmware matrix | Not yet verified; use an OPay-provisioned terminal enabled for the public POS API |
-| Create Payment | Live physical-terminal flow verified |
-| Query Order | Live cashier-triggered status check verified |
+| Create Payment | Automated and mocked integration verified; Odoo 18 physical-terminal acceptance is not yet verified |
+| Query Order | Automated and mocked integration verified; live Odoo 18 acceptance is not yet verified |
 | Webhook implementation | Implemented and covered by automated authentication/correlation tests |
 | Live OPay webhook delivery | Not yet verified end to end |
 
@@ -62,6 +62,24 @@ Cashier clicks Check Payment Status -> Odoo Query Order -> exact payment line
 
 Query Order is not polled automatically.
 
+## External OPay service and transaction data
+
+This addon communicates with the external OPay cloud POS service only after an
+administrator deliberately configures OPay and a cashier starts an OPay payment
+or explicitly clicks **Check Payment Status**.
+
+For Create Payment, Odoo sends the configured Business ID, Branch ID, terminal
+serial number, stable payment reference, amount, NGN currency, expiry,
+scene/sub-scene, non-split indicator, timestamp, and authenticated encrypted
+protocol envelope. For Query Order, Odoo sends the stored merchant, terminal,
+and order references needed to query that same attempt.
+
+Odoo receives OPay's business order reference, OPay order reference, payment
+status, response message, timestamps, and authenticated webhook/query
+transaction data used for exact correlation. The addon does not send customer
+names, card details, PINs, bank-account details, or wallet credentials in its
+Create Payment or Query Order payloads.
+
 ## Implemented scope
 
 - Native Odoo `pos.payment.method` terminal registration.
@@ -82,7 +100,7 @@ terminals, automatic Query Order polling, or automatic HTTP retries.
 
 ## Requirements
 
-- Odoo 19 with Point of Sale installed.
+- Odoo 18 with Point of Sale installed.
 - An OPay merchant/business enabled for the documented POS API.
 - A physical OPay terminal assigned to the merchant/branch.
 - The OPay identifiers, authentication key, and RSA keys described in the
@@ -235,7 +253,9 @@ are read-only, relational navigation is disabled, and the existing company rule
 limits records to the user's allowed companies.
 
 This screen does not provide manual status changes or an administrative Query
-Order action.
+Order action that can create or force a result. For an active attempt, an ERP
+Manager may use **Check Payment Status** to query the already-existing OPay
+order; the screen then refreshes its read-only status and timestamps.
 
 ## Troubleshooting
 
@@ -301,9 +321,9 @@ payment method rather than deleting referenced accounting/POS history.
 - `clientAuthKey`, the merchant private key, and the OPay public key stay on the
   Odoo server and are not loaded into POS cashier JavaScript.
 - Restricted key fields require the Odoo ERP Manager group.
-- The client authentication key and merchant private key use password-style
-  administrative widgets. A password widget masks display only; it does not
-  provide database encryption at rest.
+- The client authentication key, OPay public key, and merchant private key use
+  password-style administrative widgets. A password widget masks display only;
+  it does not provide database encryption at rest.
 - Protect the Odoo database, backups, administrator accounts, configuration
   exports, and server filesystem according to your organization's secret policy.
 - The POS browser never calls OPay directly.
@@ -318,7 +338,8 @@ payment method rather than deleting referenced accounting/POS history.
 
 ## Known limitations
 
-- Odoo 19 Enterprise compatibility is not yet verified.
+- Odoo 18 Enterprise compatibility is not yet verified.
+- Real Odoo 18 physical-terminal acceptance is not yet verified.
 - Live OPay webhook delivery and end-to-end callback interoperability are not yet
   verified.
 - Refunds and reversals are not implemented because no supported contract has

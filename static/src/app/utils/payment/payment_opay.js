@@ -1,9 +1,15 @@
 import { _t } from "@web/core/l10n/translation";
-import { PaymentInterface } from "@point_of_sale/app/utils/payment/payment_interface";
-import { register_payment_method } from "@point_of_sale/app/services/pos_store";
+import { PaymentInterface } from "@point_of_sale/app/payment/payment_interface";
+import { register_payment_method } from "@point_of_sale/app/store/pos_store";
 
 const WAITING_STATUSES = new Set(["waiting", "uncertain", "PENDING"]);
-const FAILED_STATUSES = new Set(["failed", "FAIL", "CLOSE", "CANCEL"]);
+const FAILED_STATUSES = new Set([
+    "failed",
+    "not_found",
+    "FAIL",
+    "CLOSE",
+    "CANCEL",
+]);
 export const MANUAL_STATUS_CHECK_COOLDOWN_MS = 4000;
 
 export class PaymentOpay extends PaymentInterface {
@@ -16,8 +22,8 @@ export class PaymentOpay extends PaymentInterface {
         this.manualStatusCheckCooldowns = {};
     }
 
-    async sendPaymentRequest(uuid) {
-        super.sendPaymentRequest(uuid);
+    async send_payment_request(uuid) {
+        super.send_payment_request(uuid);
         const paymentLine = this._findPaymentLine(uuid);
         if (!paymentLine) {
             this._showFailure(_t("The OPay payment line could not be found."));
@@ -36,13 +42,13 @@ export class PaymentOpay extends PaymentInterface {
                     [this.payment_method_id.id],
                     {
                         reference: uuid,
-                        amount: paymentLine.getAmount(),
+                        amount: paymentLine.get_amount(),
                         session_id: this.pos.session.id,
                     },
                 ]
             );
         } catch {
-            paymentLine.setPaymentStatus("waitingCard");
+            paymentLine.set_payment_status("waitingCard");
             this._showStatus(
                 _t(
                     "The OPay payment could not be verified. Do not start another " +
@@ -55,7 +61,7 @@ export class PaymentOpay extends PaymentInterface {
 
         if (!this._isCorrelated(paymentLine, response)) {
             delete this.paymentLineResolvers[uuid];
-            paymentLine.setPaymentStatus("retry");
+            paymentLine.set_payment_status("retry");
             this._showFailure(_t("Odoo returned a mismatched OPay payment response."));
             return false;
         }
@@ -64,7 +70,7 @@ export class PaymentOpay extends PaymentInterface {
         // A correlated WebSocket notification may have settled the attempt
         // while the Create RPC was still returning.
         if (!this.paymentLineResolvers[uuid]) {
-            return paymentLine.isDone();
+            return paymentLine.is_done();
         }
 
         if (response?.status === "SUCCESS" && response.payment_completed === true) {
@@ -73,7 +79,7 @@ export class PaymentOpay extends PaymentInterface {
             return true;
         }
         if (WAITING_STATUSES.has(response?.status)) {
-            paymentLine.setPaymentStatus("waitingCard");
+            paymentLine.set_payment_status("waitingCard");
             this._showStatus(
                 response.message ||
                     _t("OPay accepted the payment request. Waiting for customer payment."),
@@ -83,27 +89,27 @@ export class PaymentOpay extends PaymentInterface {
         }
 
         delete this.paymentLineResolvers[uuid];
-        paymentLine.setPaymentStatus("retry");
+        paymentLine.set_payment_status("retry");
         this._showFailure(
             response?.message || _t("The OPay payment request was rejected by Odoo.")
         );
         return false;
     }
 
-    async sendPaymentCancel(order, uuid) {
-        super.sendPaymentCancel(order, uuid);
+    async send_payment_cancel(order, uuid) {
+        super.send_payment_cancel(order, uuid);
         const paymentLine = this._findPaymentLine(uuid);
         if (!paymentLine) {
             return false;
         }
-        if (paymentLine.isDone()) {
+        if (paymentLine.is_done()) {
             return false;
         }
-        if (paymentLine.getPaymentStatus() === "retry") {
+        if (paymentLine.get_payment_status() === "retry") {
             return true;
         }
 
-        paymentLine.setPaymentStatus("waitingCard");
+        paymentLine.set_payment_status("waitingCard");
         this._showStatus(
             _t(
                 "The OPay payment remains active. Use Check Payment Status after " +
@@ -136,7 +142,7 @@ export class PaymentOpay extends PaymentInterface {
                 return response;
             })
             .catch(() => {
-                paymentLine.setPaymentStatus("waitingCard");
+                paymentLine.set_payment_status("waitingCard");
                 return false;
             })
             .finally(() => {
@@ -164,14 +170,14 @@ export class PaymentOpay extends PaymentInterface {
             ])
             .then((response) => {
                 if (!this._isCorrelated(paymentLine, response)) {
-                    paymentLine.setPaymentStatus("waitingCard");
+                    paymentLine.set_payment_status("waitingCard");
                     return false;
                 }
                 this.handleOpayStatusResponse(response);
                 return response;
             })
             .catch(() => {
-                paymentLine.setPaymentStatus("waitingCard");
+                paymentLine.set_payment_status("waitingCard");
                 return false;
             })
             .finally(() => {
@@ -233,6 +239,12 @@ export class PaymentOpay extends PaymentInterface {
         }
         this._storeReferences(paymentLine, response);
 
+        // Backend finalization is authoritative and first-final-wins.  Keep the
+        // browser equally defensive if a delayed/conflicting event arrives.
+        if (paymentLine.is_done()) {
+            return response.status === "SUCCESS" && response.payment_completed === true;
+        }
+
         if (response.status === "SUCCESS" && response.payment_completed === true) {
             this._showStatus(response.message, "success");
             this._settlePaymentLine(paymentLine, true);
@@ -244,7 +256,7 @@ export class PaymentOpay extends PaymentInterface {
             return false;
         }
         if (WAITING_STATUSES.has(response.status)) {
-            paymentLine.setPaymentStatus("waitingCard");
+            paymentLine.set_payment_status("waitingCard");
         }
         return false;
     }
@@ -257,7 +269,7 @@ export class PaymentOpay extends PaymentInterface {
 
     _settlePaymentLine(paymentLine, successful) {
         const resolver = this.paymentLineResolvers[paymentLine.uuid];
-        paymentLine.handlePaymentResponse(successful);
+        paymentLine.handle_payment_response(successful);
         if (resolver) {
             delete this.paymentLineResolvers[paymentLine.uuid];
             resolver(successful);
