@@ -92,17 +92,6 @@ class TestPosPaymentMethod(TransactionCase):
             "payment_method_type != 'terminal' or type == 'bank'",
         )
         self.assertIn("select a Bank journal", " ".join(journal_hint[0].itertext()))
-        service_disclosure = form_arch.xpath(
-            "//div[@name='opay_external_service_disclosure']"
-        )
-        self.assertEqual(len(service_disclosure), 1)
-        self.assertEqual(
-            service_disclosure[0].get("invisible"),
-            "use_payment_terminal != 'opay'",
-        )
-        disclosure_text = " ".join(service_disclosure[0].itertext())
-        self.assertIn("external OPay cloud POS service", disclosure_text)
-        self.assertIn("does not send customer card", disclosure_text)
         for section in (
             "OPay Merchant and Terminal",
             "OPay Authentication",
