@@ -5,6 +5,8 @@ through OPay's public wireless POS API. When a cashier selects OPay, Odoo sends
 the payment amount to the assigned terminal and waits for an authenticated final
 status before completing the payment.
 
+**Installing the addon? Follow the [Installation Guide](INSTALLATION.md).**
+
 This is an Odoo POS payment-terminal addon. It is not an Odoo online payment
 provider, an eCommerce checkout integration, an OPay wallet integration, or a
 general OPay ERP module.
