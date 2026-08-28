@@ -1,0 +1,37 @@
+name: Build GitHub Release
+
+on:
+  push:
+    tags:
+      - "18.0.*"
+      - "19.0.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Package and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build merchant-installable ZIP
+        run: >-
+          python .github/scripts/build_release.py
+          --tag "${GITHUB_REF_NAME}"
+          --output-directory dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          "dist/pos_opay-${GITHUB_REF_NAME}.zip"
+          "dist/pos_opay-${GITHUB_REF_NAME}.zip.sha256"
+          --verify-tag
+          --title "OPay POS Terminal ${GITHUB_REF_NAME}"
+          --generate-notes
