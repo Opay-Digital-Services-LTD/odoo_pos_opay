@@ -1,12 +1,3 @@
-<!--
-Marketplace media is intentionally not rendered until approved assets exist.
-Planned references and alt text:
-- icon.png — alt: "OPay POS Terminal application icon"
-- opay_pos_terminal_cover.png — alt: "OPay physical terminal payment flow in Odoo Point of Sale"
-- screenshots/payment_method_configuration.png — alt: "OPay terminal configuration on an Odoo payment method"
-- screenshots/pos_check_payment_status.png — alt: "Check Payment Status on a waiting OPay payment line"
-- screenshots/payment_attempt_status.png — alt: "Read-only OPay payment status and transaction references"
--->
 <section class="container py-4">
     <div class="text-center mb-5">
         <h1 class="display-4">OPay POS Terminal</h1>
@@ -15,6 +6,11 @@ Planned references and alt text:
             terminal and complete the exact payment line only after an authenticated
             final result.
         </p>
+        <img
+            src="opay_pos_terminal_cover.png"
+            class="img-fluid rounded border mt-3"
+            alt="OPay terminal payment flow in Odoo Point of Sale"
+        />
     </div>
 
     <div class="alert alert-info mb-4" role="alert">
@@ -34,6 +30,17 @@ Planned references and alt text:
         <p>
             Selecting OPay deliberately enables the external OPay data transfer
             described below. The payment method maps to one unique physical terminal.
+        </p>
+    </div>
+
+    <div class="mb-5 text-center">
+        <img
+            src="payment_method_configuration.png"
+            class="img-fluid rounded border"
+            alt="OPay terminal configuration on an Odoo payment method"
+        />
+        <p class="text-muted mt-2">
+            Configure the OPay merchant, terminal, and server-side authentication values.
         </p>
     </div>
 
@@ -73,6 +80,17 @@ Planned references and alt text:
             <li>Read-only operational payment-attempt records.</li>
             <li>Multi-company isolation and safe operational logging.</li>
         </ul>
+    </div>
+
+    <div class="mb-5 text-center">
+        <img
+            src="pos_check_payment_status.png"
+            class="img-fluid rounded border"
+            alt="Check Payment Status on a waiting OPay payment line"
+        />
+        <p class="text-muted mt-2">
+            Cashiers can check the existing payment without creating another OPay order.
+        </p>
     </div>
 
     <div class="mb-5">
@@ -141,6 +159,17 @@ Planned references and alt text:
                 a blind Create Payment retry.
             </p>
         </div>
+    </div>
+
+    <div class="mb-5 text-center">
+        <img
+            src="payment_attempt_status.png"
+            class="img-fluid rounded border"
+            alt="Read-only OPay payment status and transaction references"
+        />
+        <p class="text-muted mt-2">
+            Authorized backend users can inspect safe operational payment details.
+        </p>
     </div>
 
     <div class="mb-5">

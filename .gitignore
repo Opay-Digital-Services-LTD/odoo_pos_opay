@@ -28,7 +28,6 @@ dist/
 
 docs/*
 !docs/OPAY_ONBOARDING.md
-AGENTS.md
 
 Thumbs.db
 .DS_Store

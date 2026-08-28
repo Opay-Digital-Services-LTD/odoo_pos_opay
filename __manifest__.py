@@ -25,6 +25,12 @@ polling, blind Create retry, or refund/reversal implementation.
     "category": "Sales/Point of Sale",
     "license": "LGPL-3",
     "author": "Opay Digital Services Limited",
+    "images": [
+        "static/description/opay_pos_terminal_cover.png",
+        "static/description/payment_method_configuration.png",
+        "static/description/pos_check_payment_status.png",
+        "static/description/payment_attempt_status.png",
+    ],
 
     "depends": [
         "point_of_sale",
