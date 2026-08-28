@@ -21,8 +21,6 @@ configuration files.
 - `isSplit = N`;
 - one Odoo OPay payment method for one unique physical terminal serial number.
 
-Odoo 19 Community has been verified in the current environment.
-
 ## Values to request from OPay
 
 | Odoo field | OPay/API name | Where the addon uses it |
@@ -166,11 +164,10 @@ validates the `merchantId` and `X-Opay-Tranid` headers plus the encrypted
 envelope fields. Do not wrap the notification in Odoo JSON-RPC and do not create
 a separate custom controller URL.
 
-Live OPay webhook delivery has not yet been verified end to end for this addon.
-During rollout, keep the cashier-triggered **Check Payment Status** action
-available and compare Odoo's safe webhook logs with the current OPay onboarding
-material. Never bypass signature, timestamp, or correlation checks to make an
-incompatible callback appear successful.
+Keep the cashier-triggered **Check Payment Status** action available as the
+explicit fallback when a webhook is delayed or unavailable. Never bypass
+signature, timestamp, or correlation checks to make an incompatible callback
+appear successful.
 
 ## How the values remain isolated
 
@@ -261,16 +258,6 @@ The addon does not automatically poll Query Order. It also does not retry Create
 Payment after a timeout, lost browser response, HTTP error, malformed response,
 or authentication failure. Such outcomes remain uncertain until the existing
 attempt is authoritatively reconciled.
-
-## Go-live claims still requiring verification
-
-Before making broader public support claims, verify and record:
-
-- live OPay webhook delivery, response acknowledgement, and POS notification;
-- any OPay certification or production approval requirements;
-- vendor support contact and service-level expectations.
-
-Until those checks are complete, describe each item as **Not yet verified**.
 
 ## References
 

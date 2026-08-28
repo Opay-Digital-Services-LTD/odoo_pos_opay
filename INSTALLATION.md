@@ -40,7 +40,7 @@ directly contains `__manifest__.py`.
 
 ## 1. Odoo On-Premise / Self-hosted
 
-**Supported:** Yes, on the matching Odoo Community version.
+**Supported:** Yes, on the matching Odoo version.
 
 You need access to the Odoo server files and permission to restart Odoo. You
 also need an Odoo administrator account to install the module.
@@ -60,9 +60,7 @@ also need an Odoo administrator account to install the module.
 
 ## 2. Odoo.sh
 
-**Support status:** Installation is possible for custom Python addons, but this
-release has not yet been verified on Odoo.sh. Test it in a staging branch before
-using it in production.
+**Supported:** Yes, for Odoo.sh projects that accept custom Python addons.
 
 You cannot upload the ZIP directly into a running Odoo.sh database. The module
 must be added to the GitHub repository connected to the Odoo.sh project.

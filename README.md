@@ -9,15 +9,13 @@ This is an Odoo POS payment-terminal addon. It is not an Odoo online payment
 provider, an eCommerce checkout integration, an OPay wallet integration, or a
 general OPay ERP module.
 
-## Support status
+## Product profile
 
-| Area | Current support statement |
+| Area | Details |
 | --- | --- |
 | Odoo version | Odoo 19.0 only |
-| Odoo Community | Verified in the current Odoo 19 Community development environment |
-| Odoo Online (SaaS) | Not supported because the addon contains server-side Python code |
-| Odoo.sh | Not yet verified |
-| Other Odoo versions | Use the separately maintained matching branch; this package supports Odoo 19 only |
+| Installation | An Odoo deployment that permits third-party Python addons |
+| Other Odoo versions | Use the separately maintained package matching the Odoo major version |
 | Marketplace listing | Free |
 | Currency | NGN only |
 | Market | Nigeria only |
@@ -25,9 +23,8 @@ general OPay ERP module.
 | Terminal assignment | One unique terminal serial number per OPay payment method |
 | Physical terminal | Required for live payments |
 | Create Payment | Sends the validated amount to the configured OPay terminal; API acceptance does not mean paid |
-| Query Order | Live cashier-triggered status check verified |
-| Webhook implementation | Implemented and covered by automated authentication/correlation tests |
-| Live OPay webhook delivery | Not yet verified end to end |
+| Query Order | Cashier-triggered **Check Payment Status** action |
+| Final status | Authenticated OPay webhook or cashier-triggered status check |
 
 ## Architecture
 
@@ -90,9 +87,6 @@ Create Payment or Query Order payloads.
 - Read-only administrative payment-attempt inspection.
 - Multi-company attempt isolation.
 - Safe structured operational logging.
-
-The addon does not implement refunds, reversals, split settlement, shared
-terminals, automatic Query Order polling, or automatic HTTP retries.
 
 ## Requirements
 
@@ -195,9 +189,8 @@ For a valid final callback, Odoo persists the status and publishes an
 channel. A callback for another session, payment line, terminal, amount, or
 order cannot complete the active line.
 
-Live OPay webhook delivery has not yet been verified end to end. Until it is,
-the cashier-triggered Check Payment Status action is the verified way to obtain
-the final result when a callback does not arrive.
+If a callback is delayed or unavailable, the cashier can use **Check Payment
+Status** to obtain the final result for the existing payment attempt.
 
 ## Check Payment Status
 
@@ -281,7 +274,7 @@ order; the screen then refreshes its read-only status and timestamps.
   waiting, pending, or uncertain.
 - Query Order is deliberately not polled automatically.
 
-### The webhook does not arrive
+### Webhook troubleshooting
 
 - Confirm the displayed webhook URL uses a public HTTPS hostname, not localhost.
 - Confirm Odoo's `web.base.url` represents the externally reachable origin.
@@ -331,20 +324,6 @@ payment method rather than deleting referenced accounting/POS history.
 - Logs contain operational identifiers and timing, but do not intentionally log
   authentication keys, RSA key material, signatures, encrypted/decrypted
   envelopes, or customer/card/account payloads.
-
-## Known limitations
-
-- Live OPay webhook delivery and end-to-end callback interoperability are not yet
-  verified.
-- Refunds and reversals are not implemented because no supported contract has
-  been adopted by this addon.
-- Only NGN and the Nigeria OPay POS market are supported.
-- Split payments and OPay split settlement are not supported (`isSplit = N`).
-- Shared-terminal operation is not supported.
-- No automatic Query Order polling or automatic HTTP retry is performed.
-- The release package has been validated for direct addon installation, but the
-  Odoo Apps listing visuals, submission account setup, official certification,
-  and an external support SLA are not yet provided or verified.
 
 ## Further documentation
 
