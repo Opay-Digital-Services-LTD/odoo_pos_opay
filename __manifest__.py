@@ -18,9 +18,10 @@ response messages, and authenticated webhook/query data. This addon does not
 send customer card, PIN, bank-account, or wallet details in these requests.
 
 Requires an OPay-enabled physical terminal, Nigeria/NGN operation, and an Odoo
-deployment that permits third-party Python addons. Odoo Online (SaaS) is not
-supported. Query Order is cashier-triggered only; there is no automatic Query
-polling, blind Create retry, or refund/reversal implementation.
+deployment that permits third-party Python addons. Final status is resolved by
+an authenticated OPay webhook or the cashier-triggered Check Payment Status
+action. Query Order is not polled automatically, and Create Payment is never
+retried blindly after an uncertain outcome.
 """,
     "category": "Sales/Point of Sale",
     "license": "LGPL-3",
