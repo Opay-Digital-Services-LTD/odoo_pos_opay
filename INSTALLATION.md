@@ -15,8 +15,12 @@ This guide explains how to install `pos_opay` without using Git commands.
 Download the matching ZIP from the
 [OPay POS Terminal GitHub Releases page](https://github.com/Opay-Digital-Services-LTD/odoo_pos_opay/releases):
 
-- Odoo 18: `pos_opay-18.0.1.0.0.zip`
-- Odoo 19: `pos_opay-19.0.1.0.0.zip`
+- Odoo 18: `pos_opay-18.0.1.0.1.zip`
+- Odoo 19: `pos_opay-19.0.1.0.1.zip`
+
+Choose the named `pos_opay-...zip` file under **Assets**. Do not use GitHub's
+automatically generated **Source code** ZIP, because it does not have the
+required addon folder name.
 
 Do not install an Odoo 18 package on Odoo 19, or an Odoo 19 package on Odoo 18.
 
