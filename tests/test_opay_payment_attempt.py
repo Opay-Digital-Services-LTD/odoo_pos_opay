@@ -77,6 +77,17 @@ class TestOPayPaymentAttempt(TransactionCase):
         self.assertEqual(attempt.display_name, f"OPay Payment #{attempt.id}")
         self.assertNotIn("pos.opay.payment.attempt", attempt.display_name)
 
+    def test_opay_response_message_uses_record_translation_context(self):
+        attempt_model = self.env["pos.opay.payment.attempt"]
+
+        with self.assertNoLogs("odoo.tools.translate", level="WARNING"):
+            message = attempt_model._append_opay_message(
+                "Payment is pending.", "Order accepted"
+            )
+
+        self.assertIn("OPay response", message)
+        self.assertIn("Order accepted", message)
+
     def test_valid_authenticated_success_webhook_and_duplicate_are_idempotent(self):
         attempt = self._attempt()
         envelope, headers = self._webhook(attempt, "SUCCESS")

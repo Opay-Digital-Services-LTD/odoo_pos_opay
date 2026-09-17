@@ -16,6 +16,7 @@ from odoo.modules.registry import DummyRLock, Registry
 from odoo.orm.environments import Transaction
 from odoo.service.model import retrying
 from odoo.tests.common import BaseCase, get_db_name, tagged
+from odoo.tools import mute_logger
 
 
 class ControlledOPayClient:
@@ -75,6 +76,16 @@ class TestOPayConcurrency(BaseCase):
 
     def setUp(self):
         super().setUp()
+        # PostgreSQL logs the serialization failures intentionally exercised by
+        # this class at ERROR before Odoo's retrying() helper retries them. Keep
+        # those expected test-only logs from making an Odoo.sh build appear
+        # failed while retaining the real transactions, locks, and assertions.
+        self._expected_log_mute = mute_logger(
+            "odoo.sql_db",
+            "odoo.addons.pos_opay.models.opay_payment_attempt",
+        )
+        self._expected_log_mute.__enter__()
+        self.addCleanup(self._expected_log_mute.__exit__)
         token = uuid4().hex.upper()
         with self.registry.cursor() as cr:
             env = api.Environment(cr, SUPERUSER_ID, {})

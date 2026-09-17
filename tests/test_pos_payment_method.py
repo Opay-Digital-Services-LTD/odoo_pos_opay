@@ -13,6 +13,7 @@ from odoo.addons.pos_opay.services.opay_api import (
 from odoo.addons.pos_opay.services.opay_auth import OPayConfigurationError
 from odoo.exceptions import UserError, ValidationError
 from odoo.tests.common import TransactionCase, tagged
+from odoo.tools import mute_logger
 
 
 @tagged("post_install", "-at_install")
@@ -338,6 +339,7 @@ class TestPosPaymentMethod(TransactionCase):
         self.assertFalse(second_result["payment_completed"])
         client.create_payment.assert_called_once()
 
+    @mute_logger("odoo.addons.pos_opay.models.pos_payment_method")
     def test_uncertain_request_is_not_created_twice(self):
         payment_method, session = self._runtime_records()
         client = Mock(spec=OPayClient)
@@ -406,6 +408,7 @@ class TestPosPaymentMethod(TransactionCase):
         client.create_payment.assert_called_once()
         self.assertIn("Invalid request parameters", first_result["message"])
 
+    @mute_logger("odoo.addons.pos_opay.models.pos_payment_method")
     def test_duplicate_business_order_response_is_uncertain(self):
         payment_method, session = self._runtime_records()
         client = Mock(spec=OPayClient)
@@ -428,6 +431,7 @@ class TestPosPaymentMethod(TransactionCase):
         client.create_payment.assert_called_once()
         client.query_payment.assert_not_called()
 
+    @mute_logger("odoo.addons.pos_opay.models.pos_payment_method")
     def test_invalid_server_configuration_returns_safe_failure(self):
         payment_method, session = self._runtime_records()
 

@@ -4,6 +4,21 @@ All notable changes to `pos_opay` are documented in this file. Versions follow
 Odoo's five-part addon versioning convention: the Odoo series followed by the
 addon release number.
 
+## [19.0.1.0.2]
+
+### Fixed
+
+- Gave OPay response-message translation access to the active Odoo environment,
+  eliminating missing-language warnings.
+- Kept the real concurrency and error-path tests while preventing their expected
+  serialization conflicts and rejection logs from incorrectly marking Odoo.sh
+  builds as failed or warning builds.
+
+### Safety
+
+- Payment locking, duplicate-Create prevention, final-status conflict handling,
+  and production operational logging are unchanged.
+
 ## [19.0.1.0.1]
 
 ### Changed
