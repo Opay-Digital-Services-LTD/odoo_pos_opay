@@ -865,9 +865,8 @@ class PosOpayPaymentAttempt(models.Model):
             return False
         return " ".join(message.split())[:256] or False
 
-    @classmethod
-    def _append_opay_message(cls, message, opay_message, verified=True):
-        safe_message = cls._safe_message(opay_message)
+    def _append_opay_message(self, message, opay_message, verified=True):
+        safe_message = self._safe_message(opay_message)
         if not safe_message:
             return message
         label = _("OPay response") if verified else _("Unverified OPay response")

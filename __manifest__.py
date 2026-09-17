@@ -1,6 +1,6 @@
 {
     "name": "OPay POS Terminal",
-    "version": "18.0.1.0.1",
+    "version": "18.0.1.0.2",
     "summary": "OPay payment terminal integration for Odoo Point of Sale",
     "description": """
 Connect Odoo Point of Sale to OPay physical POS terminals in Nigeria.

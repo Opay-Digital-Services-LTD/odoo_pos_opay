@@ -105,6 +105,17 @@ class TestOPayPaymentAttempt(TransactionCase):
         self.assertEqual(attempt.display_name, f"OPay Payment #{attempt.id}")
         self.assertNotIn("pos.opay.payment.attempt", attempt.display_name)
 
+    def test_opay_response_message_uses_record_translation_context(self):
+        attempt_model = self.env["pos.opay.payment.attempt"]
+
+        with self.assertNoLogs("odoo.tools.translate", level="WARNING"):
+            message = attempt_model._append_opay_message(
+                "Payment is pending.", "Order accepted"
+            )
+
+        self.assertIn("OPay response", message)
+        self.assertIn("Order accepted", message)
+
     def test_sql_constraint_rejects_duplicate_out_order_no(self):
         attempt = self._attempt()
         reference = str(uuid4())
