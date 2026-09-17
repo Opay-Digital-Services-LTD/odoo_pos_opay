@@ -62,26 +62,50 @@ also need an Odoo administrator account to install the module.
 
 **Supported:** Yes, for Odoo.sh projects that accept custom Python addons.
 
-You cannot upload the ZIP directly into a running Odoo.sh database. The module
-must be added to the GitHub repository connected to the Odoo.sh project.
+You cannot upload the ZIP directly into a running Odoo.sh database. The
+recommended method is to connect this repository to the repository used by the
+Odoo.sh project as a Git submodule. You need write access to the project
+repository, access to the Odoo.sh project, and an Odoo administrator account.
 
-You need write access to that GitHub repository, access to the Odoo.sh project,
-and an Odoo administrator account.
+1. In Odoo.sh, open the project and select a development or staging branch.
+2. Choose **Submodule → Run**.
+3. Enter the following values:
 
-1. Download and extract the correct release ZIP on your computer.
-2. Open the GitHub repository connected to your Odoo.sh project.
-3. Create or open a staging branch.
-4. In GitHub, choose **Add file → Upload files** and upload the complete
-   `pos_opay` folder. Place it at the repository root, alongside the other Odoo
-   addon folders, or in the same custom-addons directory already used by the
-   project.
-5. Commit the uploaded files through the GitHub page. This push causes Odoo.sh
-   to create a new build automatically.
-6. Wait for the build to finish, open its Odoo database, and sign in as an
+   - **Repository URL:**
+     `git@github.com:Opay-Digital-Services-LTD/odoo_pos_opay.git`
+   - **Branch:** `18.0` for Odoo 18, or `19.0` for Odoo 19
+   - **Path:** `pos_opay`
+
+4. Run the command, commit the generated submodule change, and push it to the
+   project branch. Odoo.sh will create a new build.
+5. Confirm that the connected project repository contains `.gitmodules` and a
+   submodule directory named exactly `pos_opay`.
+6. Wait for the build to finish, open its database, and sign in as an
    administrator.
 7. Open **Apps → Update Apps List**, search for **OPay POS Terminal**, and select
    **Install**. Remove the default Apps filter if necessary.
 8. Verify the module in staging before merging the branch into production.
+
+The checkout directory must be named `pos_opay`. Do not use the GitHub
+repository name `odoo_pos_opay` as the submodule path. Odoo uses the directory
+name as the addon's technical name; an incorrect name prevents assets referenced
+as `pos_opay/static/...` from loading and may result in a blank Odoo page.
+
+The expected project layout is:
+
+```text
+.gitmodules
+pos_opay/
+    __manifest__.py
+    __init__.py
+    static/
+    ...
+```
+
+A submodule records a specific repository revision. When a new `pos_opay`
+version is released, update the submodule reference in the Odoo.sh project
+repository and push that small change to create a new build. Do not keep a
+manually uploaded second copy of `pos_opay` beside the submodule.
 
 ## 3. Local Odoo Development or Testing
 
@@ -119,6 +143,14 @@ for the test database.
 - Remove the default Apps filter or select the **Extra** filter.
 - Confirm the custom-addons directory is included in `addons_path`.
 - Restart Odoo and run **Apps → Update Apps List** again.
+
+### Odoo.sh opens a blank page after adding the repository
+
+- Check `.gitmodules` and confirm the submodule path is exactly `pos_opay`.
+- Confirm `pos_opay/__manifest__.py` exists in the project branch.
+- Do not install it from a directory named `odoo_pos_opay`.
+- After correcting the path and completing a new build, use a private browser
+  window or refresh with `Ctrl+Shift+R` so old broken assets are not reused.
 
 ### Odoo reports an incompatible version
 
