@@ -1,9 +1,71 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <templates id="template" xml:space="preserve">
     <t t-inherit="point_of_sale.PaymentScreenPaymentLines" t-inherit-mode="extension">
-        <xpath expr="//t[@t-elif=&quot;line.payment_status == 'waitingCard'&quot;]/div[2]" position="inside">
+        <xpath expr="//t[@t-elif=&quot;line.payment_status == 'retry'&quot;]/div[1]" position="replace">
+            <div class="electronic_status">
+                <t t-if="this.isOpayTerminalBlocked(line)">
+                    A previous payment needs confirmation before another request can be sent.
+                </t>
+                <t t-elif="line.payment_method_id.use_payment_terminal === 'opay'">This sale has not been paid by OPay.</t>
+                <t t-else="">Transaction cancelled</t>
+            </div>
+        </xpath>
+        <xpath expr="//t[@t-elif=&quot;line.payment_status == 'retry'&quot;]//div[@title='Send Payment Request']" position="replace">
+            <div t-if="line.payment_method_id.use_payment_terminal === 'opay' and !this.isOpayTerminalBlocked(line) and this.isOpayRetrySafe(line)"
+                class="d-flex justify-content-center w-100">
+                <button type="button"
+                    class="o_pos_opay_retry btn btn-primary px-4 py-2 my-2"
+                    title="Retry OPay Payment"
+                    t-on-click.stop="() => this.props.sendPaymentRequest(line)">Retry OPay Payment</button>
+            </div>
+            <div t-elif="line.payment_method_id.use_payment_terminal !== 'opay'"
+                class="button send_payment_request highlight text-bg-primary"
+                title="Send Payment Request"
+                t-on-click="() => this.props.sendPaymentRequest(line)">Retry</div>
+        </xpath>
+        <xpath expr="//t[@t-elif=&quot;line.payment_status == 'retry'&quot;]" position="inside">
+            <button t-if="this.canCheckOpayStatus(line) and (this.isOpayTerminalBlocked(line) or !this.isOpayRetrySafe(line))" type="button"
+                class="o_pos_opay_check_previous btn btn-secondary px-3 py-2 my-2 me-3"
+                t-att-disabled="this.isOpayStatusCheckDisabled(line)"
+                t-on-click.stop="() => this.checkOpayPaymentStatus(line)">
+                <t t-if="this.isCheckingOpayStatus(line)">
+                    <i class="fa fa-circle-o-notch fa-spin me-2" role="img"/>Checking...
+                </t>
+                <t t-else="">Check Payment Status</t>
+            </button>
+        </xpath>
+        <xpath expr="//t[@t-elif=&quot;line.payment_status == 'force_done'&quot;]//div[@title='Force Done']" position="attributes">
+            <attribute name="t-if">line.payment_method_id.use_payment_terminal !== 'opay'</attribute>
+        </xpath>
+        <xpath expr="//t[@t-elif=&quot;line.payment_status == 'waitingCard'&quot;]//div[@title='Force Done']" position="attributes">
+            <attribute name="t-if">line.payment_method_id.use_payment_terminal !== 'opay'</attribute>
+        </xpath>
+        <xpath expr="//div[@title='Force Cancel']" position="attributes">
+            <attribute name="t-if">line.payment_status == 'waitingCancel' and line.payment_method_id.use_payment_terminal !== 'opay'</attribute>
+        </xpath>
+        <xpath expr="//div[@title='Cancel Payment Request']" position="attributes">
+            <attribute name="t-if">!this.props.isRefundOrder and line.payment_method_id.use_payment_terminal !== 'opay'</attribute>
+        </xpath>
+        <xpath expr="//t[contains(@t-elif, 'waitingCancel')]//div[@title='Force Done']" position="attributes">
+            <attribute name="t-if">line.payment_status == 'waiting' and line.payment_method_id.use_payment_terminal !== 'opay'</attribute>
+        </xpath>
+        <xpath expr="//t[contains(@t-elif, 'waitingCancel')]//i" position="attributes">
+            <attribute name="t-if">line.payment_method_id.use_payment_terminal !== 'opay'</attribute>
+        </xpath>
+        <xpath expr="//t[contains(@t-elif, 'waitingCancel')]/div[1]" position="replace">
+            <div class="electronic_status">
+                <t t-if="line.payment_method_id.use_payment_terminal === 'opay'">Payment not yet confirmed</t>
+                <t t-else="">Request sent</t>
+            </div>
+        </xpath>
+        <xpath expr="//t[contains(@t-elif, &quot;['waitingCard', 'waitingCapture']&quot;)]//i" position="attributes">
+            <attribute name="class">fa</attribute>
+            <attribute name="t-att-class">line.payment_method_id.use_payment_terminal === 'opay' ? 'fa-clock-o' : 'fa-circle-o-notch fa-spin'</attribute>
+        </xpath>
+        <xpath expr="//div[contains(@class, 'electronic_payment') or contains(@t-attf-class, 'electronic_payment')]" position="inside">
+            <div t-if="this.canCheckOpayStatus(line) and line.payment_status !== 'retry'" class="text-center text-muted mt-2">Payment is not confirmed. Check Payment Status before taking another payment.</div>
             <button
-                t-if="this.canCheckOpayStatus(line)"
+                t-if="this.canCheckOpayStatus(line) and line.payment_status !== 'retry'"
                 type="button"
                 class="button o_pos_opay_check_status btn btn-secondary w-100 mt-2"
                 t-att-disabled="this.isOpayStatusCheckDisabled(line)"

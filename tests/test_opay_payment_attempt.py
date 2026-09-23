@@ -289,6 +289,17 @@ class TestOPayPaymentAttempt(TransactionCase):
                 self.assertTrue(attempt.frontend_response()["terminal_released"])
                 self.assertFalse(attempt.frontend_response()["payment_completed"])
 
+    def test_api_success_message_cannot_make_closed_payment_look_successful(self):
+        attempt = self._attempt()
+        attempt.write({"status": "CLOSE", "last_status_message": "SUCCESS"})
+
+        response = attempt.frontend_response()
+
+        self.assertEqual(response["status"], "CLOSE")
+        self.assertFalse(response["payment_completed"])
+        self.assertIn("status-check message", response["message"])
+        self.assertIn("does not mean the payment succeeded", response["message"])
+
     def test_webhook_rejects_invalid_signature_and_expired_timestamp(self):
         attempt = self._attempt()
         envelope, headers = self._webhook(attempt, "SUCCESS")
@@ -670,8 +681,8 @@ class TestOPayPaymentAttempt(TransactionCase):
             )
 
         self.assertEqual(stale_attempt.status, "waiting")
-        self.assertEqual(response["status"], "failed")
-        self.assertIn("Check Payment Status", response["message"])
+        self.assertEqual(response["status"], "terminal_blocked")
+        self.assertIn("Check Previous Payment", response["message"])
         client_factory.assert_not_called()
         client.query_payment.assert_not_called()
         client.create_payment.assert_not_called()
@@ -699,6 +710,153 @@ class TestOPayPaymentAttempt(TransactionCase):
         client_factory.assert_not_called()
         client.query_payment.assert_not_called()
         client.create_payment.assert_not_called()
+
+    def test_cashier_can_resolve_previous_payment_without_attempt_write_access(self):
+        cashier = self.env["res.users"].create({
+            "name": "OPay counter recovery test",
+            "login": "opay-counter-recovery-test",
+            "group_ids": [(6, 0, [self.env.ref("point_of_sale.group_pos_user").id])],
+            "company_id": self.env.company.id,
+            "company_ids": [(6, 0, [self.env.company.id])],
+        })
+        request = {"reference": str(uuid4()), "session_id": self.session.id}
+        for status in ("SUCCESS", "FAIL", "CLOSE", "CANCEL"):
+            with self.subTest(status=status):
+                previous = self._attempt(status="uncertain")
+                client = Mock(spec=OPayClient)
+                client.query_payment.side_effect = [
+                    self._result(previous, status),
+                    OPayOrderNotFoundError("50002", "order not exist"),
+                ]
+                with patch.object(OPayClient, "from_payment_method", return_value=client), patch.object(
+                    type(self.config), "_notify", autospec=True
+                ) as notify:
+                    response = self.payment_method.with_user(cashier).opay_check_previous_payment(request)
+                self.assertEqual(response["status"], "terminal_available")
+                self.assertEqual(response["reference"], request["reference"])
+                self.assertFalse(response["payment_completed"])
+                self.assertEqual(response["previous_payment"]["reference"], previous.payment_reference)
+                self.assertEqual(previous.status, status)
+                self.assertTrue(previous.finalized_at)
+                self.assertEqual(notify.call_args.args[2]["reference"], previous.payment_reference)
+                self.assertEqual(client.query_payment.call_count, 2)
+                client.query_payment.assert_any_call(
+                    out_order_no=previous.out_order_no, order_no=previous.order_no
+                )
+                client.query_payment.assert_any_call(
+                    out_order_no=request["reference"].replace("-", "").upper()
+                )
+                client.create_payment.assert_not_called()
+                with self.assertRaises(AccessError):
+                    previous.with_user(cashier).write({"status": "CANCEL"})
+
+    def test_previous_pending_and_query_failure_keep_terminal_blocked(self):
+        previous = self._attempt(status="PENDING")
+        client = Mock(spec=OPayClient)
+        client.query_payment.return_value = self._result(previous, "PENDING")
+        request = {"reference": str(uuid4()), "session_id": self.session.id}
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            pending = self.payment_method.opay_check_previous_payment(request)
+            client.query_payment.side_effect = OPayHTTPError(500)
+            uncertain = self.payment_method.opay_check_previous_payment(request)
+        for response in (pending, uncertain):
+            self.assertEqual(response["status"], "terminal_blocked")
+            self.assertFalse(response["payment_completed"])
+        self.assertEqual(previous.status, "PENDING")
+        self.assertFalse(previous.finalized_at)
+        client.create_payment.assert_not_called()
+
+    def test_previous_confirmed_absent_releases_only_original_attempt(self):
+        previous = self._attempt(status="uncertain")
+        request = {"reference": str(uuid4()), "session_id": self.session.id}
+        client = Mock(spec=OPayClient)
+        client.query_payment.side_effect = OPayOrderNotFoundError("50002", "order not exist")
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            response = self.payment_method.opay_check_previous_payment(request)
+        self.assertEqual(previous.status, "failed")
+        self.assertTrue(previous.finalized_at)
+        self.assertEqual(response["status"], "terminal_available")
+        self.assertFalse(response["payment_completed"])
+        self.assertFalse(self.env["pos.opay.payment.attempt"].search([
+            ("payment_reference", "=", request["reference"]),
+        ]))
+        client.create_payment.assert_not_called()
+
+    def test_previous_payment_from_older_session_keeps_original_links(self):
+        previous = self._attempt()
+        original_session = self.session
+        original_session.write({"state": "closed"})
+        new_session = self.env["pos.session"].create({
+            "config_id": self.config.id, "user_id": self.env.user.id, "state": "opened",
+        })
+        client = Mock(spec=OPayClient)
+        client.query_payment.side_effect = [
+            self._result(previous, "SUCCESS"),
+            OPayOrderNotFoundError("50002", "order not exist"),
+        ]
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            response = self.payment_method.opay_check_previous_payment({
+                "reference": str(uuid4()), "session_id": new_session.id,
+            })
+        self.assertEqual(previous.pos_session_id, original_session)
+        self.assertEqual(response["previous_payment"]["pos_session_id"], original_session.id)
+        self.assertEqual(response["pos_session_id"], new_session.id)
+        self.assertFalse(response["payment_completed"])
+
+    def test_clearing_previous_does_not_release_unknown_current_create(self):
+        previous = self._attempt()
+        request = {"reference": str(uuid4()), "session_id": self.session.id}
+        client = Mock(spec=OPayClient)
+        client.query_payment.side_effect = [
+            self._result(previous, "CLOSE"), OPayHTTPError(500),
+        ]
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            response = self.payment_method.opay_check_previous_payment(request)
+        self.assertEqual(previous.status, "CLOSE")
+        self.assertTrue(previous.finalized_at)
+        self.assertEqual(response["status"], "uncertain")
+        self.assertFalse(response["safe_to_retry"])
+        self.assertEqual(response["reference"], request["reference"])
+        self.assertEqual(client.query_payment.call_count, 2)
+        client.create_payment.assert_not_called()
+
+    def test_previous_payment_cannot_be_queried_from_another_config(self):
+        previous = self._attempt()
+        config = self.env["pos.config"].create({
+            "name": "Other counter recovery test",
+            "payment_method_ids": [(6, 0, [self.payment_method.id])],
+        })
+        session = self.env["pos.session"].create({
+            "config_id": config.id, "user_id": self.env.user.id, "state": "opened",
+        })
+        from odoo.exceptions import UserError
+        with patch.object(OPayClient, "from_payment_method") as factory:
+            with self.assertRaises(UserError):
+                self.payment_method.opay_check_previous_payment({
+                    "reference": str(uuid4()), "session_id": session.id,
+                })
+        factory.assert_not_called()
+        self.assertEqual(previous.status, "waiting")
+
+    def test_previous_check_preserves_current_success_and_missing_outcome_safety(self):
+        current = self._attempt(status="SUCCESS")
+        previous = self._attempt()
+        with patch.object(OPayClient, "from_payment_method") as factory:
+            response = self.payment_method.opay_check_previous_payment({
+                "reference": current.payment_reference, "session_id": self.session.id,
+            })
+        self.assertEqual(response["status"], "SUCCESS")
+        self.assertEqual(response["reference"], current.payment_reference)
+        self.assertEqual(previous.status, "waiting")
+        factory.assert_not_called()
+        previous.write({"status": "CLOSE"})
+        with patch.object(type(self.payment_method), "_opay_resolve_missing_attempt",
+                          return_value={"status": "uncertain", "safe_to_retry": False}) as recover:
+            response = self.payment_method.opay_check_previous_payment({
+                "reference": str(uuid4()), "session_id": self.session.id,
+            })
+        recover.assert_called_once()
+        self.assertFalse(response["safe_to_retry"])
 
     def _attempt(self, status="waiting", expires_at=None):
         reference = str(uuid4())

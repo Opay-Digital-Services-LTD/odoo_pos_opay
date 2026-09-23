@@ -334,7 +334,7 @@ class TestOPayConcurrency(BaseCase):
 
         self.assertEqual(len(client.create_calls), 1)
         self.assertEqual(first_result["status"], "waiting")
-        self.assertEqual(second_result["status"], "failed")
+        self.assertEqual(second_result["status"], "terminal_blocked")
         attempts = self._attempt_rows()
         self.assertEqual(len(attempts), 1)
         self.assertEqual(attempts[0]["payment_reference"], first_reference)

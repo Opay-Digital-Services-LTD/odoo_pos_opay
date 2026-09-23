@@ -12,6 +12,7 @@ import { PaymentScreen } from "@point_of_sale/app/screens/payment_screen/payment
 import { PaymentOpay } from "@pos_opay/app/utils/payment/payment_opay";
 import "@pos_opay/app/services/pos_store";
 import "@pos_opay/app/screens/payment_screen/payment_lines/payment_lines";
+import "@pos_opay/app/screens/payment_screen/payment_screen";
 import { definePosModels } from "@point_of_sale/../tests/unit/data/generate_model_definitions";
 import { getFilledOrder, setupPosEnv } from "@point_of_sale/../tests/unit/utils";
 
@@ -101,6 +102,43 @@ test("accepted backend request never schedules an automatic status query", async
     });
     await expect(paymentResult).resolves.toBe(true);
     expect(paymentLine.getPaymentStatus()).toBe("done");
+});
+
+test("zero amount is rejected locally without Create", async () => {
+    const store = await setupPosEnv();
+    const order = await getFilledOrder(store);
+    const method = store.models["pos.payment.method"].find(
+        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
+    );
+    const line = order.addPaymentline(method).data;
+    line.setAmount(0);
+    let createCalls = 0;
+    onRpc("pos.payment.method", "opay_create_payment_request", () => createCalls++);
+    expect(await line.pay()).toBe(false);
+    expect(line.getPaymentStatus()).toBe("retry");
+    expect(createCalls).toBe(0);
+});
+
+test("invalid amount fails before Create and does not enter status recovery", async () => {
+    const store = await setupPosEnv();
+    const order = await getFilledOrder(store);
+    const method = store.models["pos.payment.method"].find(
+        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
+    );
+    const line = order.addPaymentline(method).data;
+    let statusCalls = 0;
+    onRpc("pos.payment.method", "opay_create_payment_request", () => ({
+        status: "failed",
+        message: "Enter a payment amount greater than zero before sending to OPay.",
+        reference: line.uuid,
+        out_order_no: "STABLE-REFERENCE",
+        payment_completed: false,
+    }));
+    onRpc("pos.payment.method", "opay_get_payment_status", () => statusCalls++);
+    onRpc("pos.payment.method", "opay_resolve_create_outcome", () => statusCalls++);
+    expect(await line.pay()).toBe(false);
+    expect(line.getPaymentStatus()).toBe("retry");
+    expect(statusCalls).toBe(0);
 });
 
 test("backend rejection moves the payment to retry and informs the cashier", async () => {
@@ -823,6 +861,31 @@ test("Check Payment Status appears only for a waiting OPay attempt", async () =>
     paymentLine.payment_ref_no = false;
     await animationFrame();
     expect(queryAll(".o_pos_opay_check_status")).toHaveLength(1);
+    paymentLine.uiState = "{}";
+    for (const state of ["waiting", "waitingCancel", "waitingCapture", "force_done", "timeout"]) {
+        paymentLine.setPaymentStatus(state);
+        await animationFrame();
+        expect(queryAll(".o_pos_opay_check_status")).toHaveLength(1);
+        expect(queryAll(".electronic_payment .fa-spin")).toHaveLength(0);
+    }
+    paymentLine.setPaymentStatus("retry");
+    paymentLine.uiState = '{"opayTerminalBlocked":true}';
+    await animationFrame();
+    expect(queryAll(".o_pos_opay_check_previous")).toHaveLength(1);
+    expect(queryAll(".electronic_payment [title='Send Payment Request']")).toHaveLength(0);
+    expect(queryAll(".o_pos_opay_retry")).toHaveLength(0);
+    paymentLine.uiState = "{}";
+    paymentLine.setPaymentStatus("done");
+    paymentLine.setPaymentStatus("retry");
+    await animationFrame();
+    expect(queryAll(".o_pos_opay_check_previous")).toHaveLength(1);
+    expect(queryAll(".o_pos_opay_retry")).toHaveLength(0);
+    paymentLine.uiState = { opayRetrySafe: true };
+    await animationFrame();
+    expect(queryAll(".o_pos_opay_check_previous")).toHaveLength(0);
+    expect(queryAll(".o_pos_opay_retry")).toHaveLength(1);
+    expect(queryOne(".o_pos_opay_retry").textContent).toInclude("Retry OPay Payment");
+    expect(queryOne(".o_pos_opay_retry").className.includes("w-100")).toBe(false);
 });
 
 test("Check Payment Status is absent for non-OPay payment lines", async () => {
@@ -1049,8 +1112,53 @@ test("manual status uncertain response remains waiting and shows safe feedback",
     expect(paymentLine.getPaymentStatus()).toBe("waitingCard");
     expect(paymentLine.isDone()).toBe(false);
     expect(notifications.at(-1).message).toBe(
-        "Unable to verify the payment status. Please try again."
+        "The provider result could not be verified."
     );
+});
+
+test("Force done cannot complete an unresolved OPay line", async () => {
+    const store = await setupPosEnv();
+    const order = await getFilledOrder(store);
+    const method = store.models["pos.payment.method"].find(
+        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
+    );
+    const line = order.addPaymentline(method).data;
+    line.setPaymentStatus("waitingCard");
+    const notifications = [];
+    patchWithCleanup(store.notification, {
+        add(message) {
+            notifications.push(message);
+        },
+    });
+    const screen = Object.create(PaymentScreen.prototype);
+    screen.notification = store.notification;
+
+    expect(screen.sendForceDone(line)).toBe(false);
+    expect(line.getPaymentStatus()).toBe("waitingCard");
+    expect(order.finalized).toBe(false);
+    expect(notifications.at(-1)).toInclude("confirmed OPay payment");
+});
+
+test("adding another payment explains the unresolved OPay blocker", async () => {
+    const store = await setupPosEnv();
+    const order = await getFilledOrder(store);
+    const method = store.models["pos.payment.method"].find(
+        (paymentMethod) => paymentMethod.use_payment_terminal === "opay"
+    );
+    const line = order.addPaymentline(method).data;
+    line.setPaymentStatus("waitingCard");
+    const notifications = [];
+    patchWithCleanup(store.notification, {
+        add(message) {
+            notifications.push(message);
+        },
+    });
+    const screen = Object.create(PaymentScreen.prototype);
+    Object.defineProperty(screen, "paymentLines", { value: [line] });
+    screen.notification = store.notification;
+    expect(await screen.addNewPaymentLine(method)).toBe(false);
+    expect(order.payment_ids).toHaveLength(1);
+    expect(notifications.at(-1)).toInclude("Check Payment Status");
 });
 
 test("OPay configuration is absent from frontend payment-method data", async () => {

@@ -1,13 +1,16 @@
 import { onWillUnmount, useState } from "@odoo/owl";
 import { patch } from "@web/core/utils/patch";
 import { PaymentScreenPaymentLines } from "@point_of_sale/app/screens/payment_screen/payment_lines/payment_lines";
-import { MANUAL_STATUS_CHECK_COOLDOWN_MS } from "@pos_opay/app/utils/payment/payment_opay";
+import { getOpayUiState, MANUAL_STATUS_CHECK_COOLDOWN_MS } from "@pos_opay/app/utils/payment/payment_opay";
 
 const QUERYABLE_PAYMENT_STATUSES = new Set([
     "waitingCard",
     "waiting",
     "waitingCancel",
     "timeout",
+    "retry",
+    "force_done",
+    "waitingCapture",
 ]);
 
 export function isQueryableOpayPaymentLine(line) {
@@ -34,6 +37,15 @@ patch(PaymentScreenPaymentLines.prototype, {
         return isQueryableOpayPaymentLine(line);
     },
 
+    isOpayTerminalBlocked(line) {
+        return line?.payment_method_id?.use_payment_terminal === "opay" &&
+            getOpayUiState(line).opayTerminalBlocked === true;
+    },
+
+    isOpayRetrySafe(line) {
+        return getOpayUiState(line).opayRetrySafe === true;
+    },
+
     isCheckingOpayStatus(line) {
         return Boolean(this.opayStatusChecks[line.uuid]?.inProgress);
     },
@@ -51,10 +63,12 @@ patch(PaymentScreenPaymentLines.prototype, {
             return false;
         }
 
-        const state = (this.opayStatusChecks[line.uuid] = {
+        this.opayStatusChecks[line.uuid] = {
             inProgress: true,
             coolingDown: true,
-        });
+        };
+        // Mutate the reactive proxy, not the raw object assigned above.
+        const state = this.opayStatusChecks[line.uuid];
         this.opayStatusCooldownTimers[line.uuid] = setTimeout(() => {
             state.coolingDown = false;
             delete this.opayStatusCooldownTimers[line.uuid];

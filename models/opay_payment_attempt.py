@@ -819,10 +819,20 @@ class PosOpayPaymentAttempt(models.Model):
             "CANCEL": _("The OPay payment was cancelled by the operator."),
         }
         if self.last_status_message:
-            status_messages[self.status] = self._append_opay_message(
-                status_messages[self.status],
-                self.last_status_message,
-            )
+            if (
+                self.status in {"FAIL", "CLOSE", "CANCEL"}
+                and self.last_status_message.strip().upper() == "SUCCESS"
+            ):
+                status_messages[self.status] = _(
+                    "%(message)s OPay's status-check message was SUCCESS; "
+                    "that does not mean the payment succeeded.",
+                    message=status_messages[self.status],
+                )
+            else:
+                status_messages[self.status] = self._append_opay_message(
+                    status_messages[self.status],
+                    self.last_status_message,
+                )
         is_success = self.status == "SUCCESS"
         return {
             "success": is_success or self.status == "waiting",

@@ -12,6 +12,34 @@ const FAILED_STATUSES = new Set([
 ]);
 export const MANUAL_STATUS_CHECK_COOLDOWN_MS = 4000;
 
+export function getOpayUiState(paymentLine) {
+    let state = paymentLine?.uiState;
+    if (typeof state === "string") {
+        try {
+            state = JSON.parse(state);
+        } catch {
+            state = null;
+        }
+    }
+    return state && typeof state === "object" && !Array.isArray(state) ? state : {};
+}
+
+function setTerminalBlocked(paymentLine, blocked) {
+    // Restored Odoo UI state may be serialized JSON, not a mutable object.
+    // Replace it with an object while preserving unrelated valid UI properties.
+    paymentLine.uiState = { ...getOpayUiState(paymentLine), opayTerminalBlocked: blocked };
+}
+
+function setRetrySafe(paymentLine, safe) {
+    paymentLine.uiState = { ...getOpayUiState(paymentLine), opayRetrySafe: safe };
+}
+
+function isRetryAuthorized(response) {
+    return response?.status === "not_found"
+        ? response.safe_to_retry === true
+        : FAILED_STATUSES.has(response?.status) && response.terminal_released === true;
+}
+
 export class PaymentOpay extends PaymentInterface {
     setup() {
         super.setup(...arguments);
@@ -29,6 +57,11 @@ export class PaymentOpay extends PaymentInterface {
             this._showFailure(_t("The OPay payment line could not be found."));
             return false;
         }
+        const amount = paymentLine.getAmount();
+        if (!Number.isFinite(amount) || amount <= 0) {
+            this._showFailure(_t("Enter a payment amount greater than zero before sending to OPay."));
+            return false;
+        }
         // Install the resolver before the RPC. A terminal can complete quickly
         // enough for its WebSocket notification to beat the Create response.
         const paymentConfirmation = this._waitForPaymentConfirmation(uuid);
@@ -42,12 +75,13 @@ export class PaymentOpay extends PaymentInterface {
                     [this.payment_method_id.id],
                     {
                         reference: uuid,
-                        amount: paymentLine.getAmount(),
+                        amount,
                         session_id: this.pos.session.id,
                     },
                 ]
             );
         } catch {
+            setRetrySafe(paymentLine, false);
             paymentLine.setPaymentStatus("waitingCard");
             this._showStatus(
                 _t(
@@ -61,11 +95,14 @@ export class PaymentOpay extends PaymentInterface {
 
         if (!this._isCorrelated(paymentLine, response)) {
             delete this.paymentLineResolvers[uuid];
-            paymentLine.setPaymentStatus("retry");
+            setRetrySafe(paymentLine, false);
+            paymentLine.setPaymentStatus("waitingCard");
             this._showFailure(_t("Odoo returned a mismatched OPay payment response."));
             return false;
         }
         this._storeReferences(paymentLine, response);
+        setTerminalBlocked(paymentLine, response.status === "terminal_blocked");
+        setRetrySafe(paymentLine, isRetryAuthorized(response));
 
         // A correlated WebSocket notification may have settled the attempt
         // while the Create RPC was still returning.
@@ -89,6 +126,11 @@ export class PaymentOpay extends PaymentInterface {
         }
 
         delete this.paymentLineResolvers[uuid];
+        if (response?.status === "not_found" && !isRetryAuthorized(response)) {
+            paymentLine.setPaymentStatus("waitingCard");
+            this._showFailure(response.message);
+            return false;
+        }
         paymentLine.setPaymentStatus("retry");
         this._showFailure(
             response?.message || _t("The OPay payment request was rejected by Odoo.")
@@ -211,6 +253,9 @@ export class PaymentOpay extends PaymentInterface {
         if (!paymentLine) {
             return false;
         }
+        if (paymentLine.getPaymentStatus() === "retry") {
+            return this._checkPreviousPayment(paymentLine);
+        }
         // A lost Create RPC may leave the browser without OPay references.
         // Manual recovery reconstructs/correlates them on the server; it never
         // issues another Create Payment request.
@@ -219,7 +264,7 @@ export class PaymentOpay extends PaymentInterface {
             : await this.resolveCreateOutcome(uuid);
         if (!response || response.status === "uncertain") {
             this._showFailure(
-                _t("Unable to verify the payment status. Please try again.")
+                response?.message || _t("Unable to verify the payment status. Please try again.")
             );
             return response;
         }
@@ -230,6 +275,42 @@ export class PaymentOpay extends PaymentInterface {
             );
         }
         return response;
+    }
+
+    async _checkPreviousPayment(paymentLine) {
+        try {
+            const response = await this.pos.data.silentCall(
+                "pos.payment.method", "opay_check_previous_payment", [
+                    [this.payment_method_id.id],
+                    { reference: paymentLine.uuid, session_id: this.pos.session.id },
+                ]
+            );
+            if (!this._isCorrelated(paymentLine, response)) {
+                throw new Error("Mismatched payment response");
+            }
+            if (["terminal_blocked", "terminal_available"].includes(response.status)) {
+                setTerminalBlocked(paymentLine, response.status === "terminal_blocked");
+                // Never apply an earlier payment's success to the requesting sale.
+                const previous = response.previous_payment;
+                if (
+                    previous?.reference !== paymentLine.uuid &&
+                    previous?.pos_session_id === this.pos.session.id &&
+                    previous?.payment_method_id === this.payment_method_id.id
+                ) {
+                    this.handleOpayStatusResponse(previous);
+                }
+                this._showStatus(response.message, "warning");
+            } else {
+                this.handleOpayStatusResponse(response);
+                this._showStatus(response.message, "warning");
+            }
+            return response;
+        } catch {
+            this._showFailure(_t(
+                "Unable to check the previous payment. No new payment was sent. Please check again."
+            ));
+            return false;
+        }
     }
 
     handleOpayStatusResponse(response) {
@@ -251,11 +332,18 @@ export class PaymentOpay extends PaymentInterface {
             return true;
         }
         if (FAILED_STATUSES.has(response.status)) {
+            setTerminalBlocked(paymentLine, false);
+            setRetrySafe(paymentLine, isRetryAuthorized(response));
             this._showFailure(response.message || _t("The OPay payment failed."));
+            if (response.status === "not_found" && !isRetryAuthorized(response)) {
+                paymentLine.setPaymentStatus("waitingCard");
+                return false;
+            }
             this._settlePaymentLine(paymentLine, false);
             return false;
         }
         if (WAITING_STATUSES.has(response.status)) {
+            setRetrySafe(paymentLine, false);
             paymentLine.setPaymentStatus("waitingCard");
         }
         return false;
