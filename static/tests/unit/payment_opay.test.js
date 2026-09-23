@@ -85,6 +85,15 @@ test("Create acceptance and orderNo remain waiting rather than paid", async () =
     await expect(payment).resolves.toBe(false);
 });
 
+test("zero amount is rejected locally without Create or Query", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine(harness.paymentMethod, 0);
+    expect(await line.pay()).toBe(false);
+    expect(line.get_payment_status()).toBe("retry");
+    expect(harness.calls).toHaveLength(0);
+    expect(harness.notifications.at(-1).message).toInclude("greater than zero");
+});
+
 test("a correlated Create rejection becomes retryable", async () => {
     const harness = makeOpayHarness();
     const line = harness.addPaymentLine();
@@ -93,6 +102,20 @@ test("a correlated Create rejection becomes retryable", async () => {
     expect(await line.pay()).toBe(false);
     expect(line.get_payment_status()).toBe("retry");
     expect(harness.notifications.at(-1).options.type).toBe("danger");
+});
+
+test("a known invalid-amount rejection never becomes an uncertain payment", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    harness.rpcHandlers.opay_create_payment_request = () =>
+        correlatedResponse(harness, line, {
+            status: "failed",
+            message: "Enter a payment amount greater than zero before sending to OPay.",
+        });
+    expect(await line.pay()).toBe(false);
+    expect(line.get_payment_status()).toBe("retry");
+    expect(harness.calls.filter((call) => call.method === "opay_get_payment_status")).toHaveLength(0);
+    expect(harness.calls.filter((call) => call.method === "opay_resolve_create_outcome")).toHaveLength(0);
 });
 
 test("technical Create uncertainty remains unresolved with no automatic Query or retry", async () => {
@@ -216,6 +239,21 @@ test("manual PENDING and Query technical failure both preserve waiting", async (
     expect(harness.notifications.at(-1).message).toBe("Unable to verify the payment status. Please try again.");
 });
 
+test("uncertain Query shows the backend's safe explanation", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    line.payment_ref_no = "EXACT-OUT-ORDER";
+    harness.rpcHandlers.opay_get_payment_status = () =>
+        correlatedResponse(harness, line, {
+            status: "uncertain",
+            message: "OPay could not authenticate the status response. Payment remains unresolved.",
+        });
+    await harness.paymentMethod.payment_terminal.checkPaymentStatus(line.uuid);
+    expect(line.get_payment_status()).toBe("waitingCard");
+    expect(harness.notifications.at(-1).message).toInclude("Payment remains unresolved");
+});
+
 test("manual SUCCESS completes while final negatives become retryable", async () => {
     for (const status of ["SUCCESS", "FAIL", "CLOSE", "CANCEL"]) {
         const harness = makeOpayHarness();
@@ -237,11 +275,11 @@ test("Check Status visibility is restricted to unresolved OPay lines", () => {
     const harness = makeOpayHarness();
     const opayLine = harness.addPaymentLine();
     const otherLine = harness.addPaymentLine(harness.nonOpayPaymentMethod);
-    for (const status of ["waitingCard", "waiting", "waitingCancel", "timeout"]) {
+    for (const status of ["waitingCard", "waiting", "waitingCancel", "timeout", "retry"]) {
         opayLine.set_payment_status(status);
         expect(isQueryableOpayPaymentLine(opayLine)).toBe(true);
     }
-    for (const status of ["done", "retry", "reversed", undefined]) {
+    for (const status of ["done", "reversed", undefined]) {
         opayLine.set_payment_status(status);
         expect(isQueryableOpayPaymentLine(opayLine)).toBe(false);
     }
@@ -281,6 +319,28 @@ test("cancel refuses unresolved states without Query and protects SUCCESS", asyn
     expect(await terminal.send_payment_cancel(harness.order, line.uuid)).toBe(false);
     expect(line.get_payment_status()).toBe("done");
     expect(harness.calls.filter((call) => call.method === "opay_get_payment_status")).toHaveLength(0);
+});
+
+test("Force done cannot complete an unresolved OPay line", () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    const screen = makePaymentScreen(harness);
+    screen.notification = harness.pos.notification;
+    expect(PaymentScreen.prototype.sendForceDone.call(screen, line)).toBe(false);
+    expect(line.get_payment_status()).toBe("waitingCard");
+    expect(harness.notifications.at(-1).message).toInclude("confirmed OPay payment");
+});
+
+test("adding another payment explains the unresolved OPay blocker", async () => {
+    const harness = makeOpayHarness();
+    const line = harness.addPaymentLine();
+    line.set_payment_status("waitingCard");
+    const screen = makePaymentScreen(harness);
+    screen.notification = harness.pos.notification;
+    expect(await PaymentScreen.prototype.addNewPaymentLine.call(screen, harness.nonOpayPaymentMethod)).toBe(false);
+    expect(harness.order.payment_ids).toHaveLength(1);
+    expect(harness.notifications.at(-1).message).toInclude("Check Payment Status");
 });
 
 test("cancel releases only final-negative lines", async () => {

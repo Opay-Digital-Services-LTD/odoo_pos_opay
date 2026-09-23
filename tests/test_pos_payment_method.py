@@ -484,7 +484,6 @@ class TestPosPaymentMethod(TransactionCase):
             {},
             self._runtime_request(session, reference=""),
             self._runtime_request(session, reference="not-a-uuid"),
-            self._runtime_request(session, amount=0),
             self._runtime_request(session, session_id=False),
             {
                 "reference": self.payment_uuid,
@@ -497,6 +496,37 @@ class TestPosPaymentMethod(TransactionCase):
         for request in invalid_requests:
             with self.subTest(request=request), self.assertRaises(UserError):
                 payment_method.opay_create_payment_request(request)
+
+    def test_zero_amount_is_definitively_rejected_before_create(self):
+        payment_method, session = self._runtime_records()
+        with patch.object(OPayClient, "from_payment_method") as client_factory:
+            response = payment_method.opay_create_payment_request(
+                self._runtime_request(session, amount=0)
+            )
+        self.assertEqual(response["status"], "failed")
+        self.assertFalse(response["payment_completed"])
+        self.assertFalse(response["ambiguous"])
+        self.assertIn("greater than zero", response["message"])
+        self.assertFalse(
+            self.env["pos.opay.payment.attempt"].search(
+                [("payment_reference", "=", self.payment_uuid)]
+            )
+        )
+        client_factory.assert_not_called()
+
+    def test_status_check_without_local_attempt_uses_safe_recovery(self):
+        payment_method, session = self._runtime_records()
+        client = Mock(spec=OPayClient)
+        client.query_payment.side_effect = OPayConnectionError("network unavailable")
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            response = payment_method.opay_get_payment_status(
+                {"reference": self.payment_uuid, "session_id": session.id}
+            )
+        self.assertEqual(response["status"], "uncertain")
+        self.assertTrue(response["local_attempt_missing"])
+        self.assertFalse(response["safe_to_retry"])
+        client.query_payment.assert_called_once_with(out_order_no=self.out_order_no)
+        client.create_payment.assert_not_called()
 
     def test_missing_local_attempt_and_query_rejection_remain_uncertain(self):
         payment_method, session = self._runtime_records()

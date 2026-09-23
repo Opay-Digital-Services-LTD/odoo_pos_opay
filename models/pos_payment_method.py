@@ -276,7 +276,11 @@ class PosPaymentMethod(models.Model):
         try:
             normalized_amount = OPayClient.normalize_amount(request["amount"])
         except OPayConfigurationError as error:
-            raise UserError(_("The OPay payment amount is invalid.")) from error
+            return self._opay_failed_response(
+                reference,
+                out_order_no,
+                _("Enter a payment amount greater than zero before sending to OPay."),
+            )
 
         configured_method = self.sudo()
         try:
@@ -337,15 +341,17 @@ class PosPaymentMethod(models.Model):
                     ),
                 )
             if active_attempt.is_active():
-                return self._opay_failed_response(
+                response = self._opay_failed_response(
                     reference,
                     out_order_no,
                     _(
                         "The configured OPay terminal already has a payment awaiting "
-                        "confirmation. Use Check Payment Status before creating "
+                        "confirmation. Use Check Previous Payment before creating "
                         "another payment."
                     ),
                 )
+                response["status"] = "terminal_blocked"
+                return response
 
         attempt = attempt_model.create(
             attempt_model._new_attempt_values(
@@ -508,9 +514,86 @@ class PosPaymentMethod(models.Model):
             self._opay_find_status_attempt(request)
         )
         if not attempt:
-            raise UserError(_("The OPay payment attempt could not be found."))
+            return self._opay_resolve_missing_attempt(
+                _reference, _out_order_no, session
+            )
         attempt._opay_attach_session(session)
         return attempt.query_opay_status(reason="manual_check")
+
+    def opay_check_previous_payment(self, request):
+        """Explicit cashier recovery; never credit the requesting line for another sale."""
+        self.ensure_one()
+        self._opay_check_pos_user()
+        if self.use_payment_terminal != "opay":
+            raise UserError(_("OPay status requests require an OPay payment method."))
+        reference, out_order_no, session, current = self._opay_find_status_attempt(request)
+        # The method lock above serializes this selection with Create and finalization.
+        # No caller-supplied OPay reference, credentials or amount are accepted.
+        if current and (current.is_active() or current.status == "SUCCESS"):
+            current._opay_attach_session(session)
+            return current.query_opay_status(reason="manual_check")
+        attempts = self.env["pos.opay.payment.attempt"].sudo()
+        previous = attempts.search([
+            ("payment_method_id", "=", self.id),
+            ("status", "in", list(attempts.ACTIVE_STATUSES)),
+        ], limit=1)
+        if not previous:
+            # Missing local history alone is not proof that Create was never sent.
+            if not current:
+                return self._opay_resolve_missing_attempt(reference, out_order_no, session)
+            current._opay_attach_session(session)
+            return current.frontend_response(reused=True)
+        if (
+            previous.company_id != session.company_id
+            or previous.pos_config_id != session.config_id
+        ):
+            raise UserError(_(
+                "This terminal has an unresolved payment from another Point of Sale. "
+                "Check it at its original Point of Sale; this payment was not sent."
+            ))
+        # Preserve the original session/config, even when it is an older session.
+        result = previous.query_opay_status(reason="manual_previous_payment")
+        still_active = attempts.search_count([
+            ("payment_method_id", "=", self.id),
+            ("status", "in", list(attempts.ACTIVE_STATUSES)),
+        ])
+        available = not still_active
+        if available and not current:
+            # Clearing a different attempt is not evidence that an uncommitted
+            # Create for this UUID never reached OPay. Reconcile that same UUID
+            # within this explicit cashier action before enabling another Create.
+            current_result = self._opay_resolve_missing_attempt(reference, out_order_no, session)
+            if not current_result.get("safe_to_retry"):
+                return current_result
+        if result["status"] == "SUCCESS":
+            message = _(
+                "The previous OPay payment was successful and belongs to the earlier sale. "
+                "This sale has not been paid."
+            )
+        elif available:
+            message = _(
+                "The previous OPay payment is resolved. The terminal is available. "
+                "You can now send this payment."
+            )
+        else:
+            message = _(
+                "The previous OPay payment is still unresolved. This payment was not sent. "
+                "Use Check Previous Payment again later."
+            )
+        return {
+            "status": "terminal_available" if available else "terminal_blocked",
+            "reference": reference,
+            "out_order_no": out_order_no,
+            "payment_method_id": self.id,
+            "pos_session_id": session.id,
+            "payment_completed": False,
+            "message": attempts._append_opay_message(message, result.get("message")),
+            "previous_payment": {
+                **result,
+                "payment_method_id": self.id,
+                "pos_session_id": previous.pos_session_id.id,
+            },
+        }
 
     def opay_resolve_create_outcome(self, request):
         """Resolve an interrupted Create RPC without ever creating a new order."""
