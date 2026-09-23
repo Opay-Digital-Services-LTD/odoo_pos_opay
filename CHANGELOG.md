@@ -4,6 +4,24 @@ All notable changes to `pos_opay` are documented in this file. Versions follow
 Odoo's five-part addon versioning convention: the Odoo series followed by the
 addon release number.
 
+## [19.0.1.0.3]
+
+### Fixed
+
+- Made cashier Retry create a new POS payment line and a new server-derived OPay
+  business order reference, instead of resending Create for the old line.
+- Kept unresolved or unverified attempts on Check Payment Status; only a
+  confirmed final-negative or confirmed-absent result permits a fresh request.
+- Clarified that an OPay API `SUCCESS` message on a closed payment describes
+  the status check, not a successful payment.
+- Prevented rapid repeated Retry clicks from opening multiple replacement
+  payment lines.
+
+### Safety
+
+- The previous attempt and its stable reference remain in the audit history.
+  No automatic Query polling or blind Create retry was introduced.
+
 ## [19.0.1.0.2]
 
 ### Fixed
