@@ -11,6 +11,7 @@ from odoo import fields
 from odoo.addons.pos_opay.controllers.main import PosOpayController
 from odoo.addons.pos_opay.services.opay_api import (
     OPayClient,
+    OPayCreatePaymentResult,
     OPayHTTPError,
     OPayOrderNotFoundError,
 )
@@ -19,7 +20,7 @@ from odoo.addons.pos_opay.services.opay_auth import (
     OPayConfigurationError,
     OPayMalformedResponseError,
 )
-from odoo.exceptions import AccessError, ValidationError
+from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.tests.common import TransactionCase, tagged
 from odoo.tools import mute_logger
 
@@ -343,6 +344,26 @@ class TestOPayPaymentAttempt(TransactionCase):
                 self.assertTrue(attempt.frontend_response()["terminal_released"])
                 self.assertFalse(attempt.frontend_response()["payment_completed"])
 
+    def test_authenticated_initial_webhook_then_cancel_releases_attempt(self):
+        attempt = self._attempt()
+        initial_envelope, initial_headers = self._webhook(attempt, "INITIAL")
+        cancel_envelope, cancel_headers = self._webhook(attempt, "CANCEL")
+
+        with patch.object(type(self.config), "_notify", autospec=True):
+            self.env["pos.opay.payment.attempt"].process_webhook_notification(
+                initial_headers, initial_envelope, now_ms="1700000000000"
+            )
+            self.assertEqual(attempt.status, "INITIAL")
+            self.assertFalse(attempt.frontend_response()["terminal_released"])
+            self.env["pos.opay.payment.attempt"].process_webhook_notification(
+                cancel_headers, cancel_envelope, now_ms="1700000000000"
+            )
+
+        self.assertEqual(attempt.status, "CANCEL")
+        self.assertTrue(attempt.finalized_at)
+        self.assertTrue(attempt.frontend_response()["terminal_released"])
+        self.assertFalse(attempt.frontend_response()["payment_completed"])
+
     def test_api_success_message_cannot_make_closed_payment_look_successful(self):
         attempt = self._attempt()
         attempt.write({"status": "CLOSE", "last_status_message": "SUCCESS"})
@@ -351,8 +372,59 @@ class TestOPayPaymentAttempt(TransactionCase):
 
         self.assertEqual(response["status"], "CLOSE")
         self.assertFalse(response["payment_completed"])
-        self.assertIn("status-check message", response["message"])
-        self.assertIn("does not mean the payment succeeded", response["message"])
+        self.assertIn("OPay API response: SUCCESS", response["message"])
+        self.assertIn("the payment did not succeed", response["message"])
+
+    def test_cancel_api_success_message_does_not_claim_payment(self):
+        attempt = self._attempt(status="CANCEL")
+        attempt.write({"last_status_message": "SUCCESSFUL"})
+
+        response = attempt.frontend_response()
+
+        self.assertTrue(response["terminal_released"])
+        self.assertFalse(response["payment_completed"])
+        self.assertIn("OPay API response: SUCCESSFUL", response["message"])
+        self.assertIn("the payment did not succeed", response["message"])
+
+    def test_initial_and_pending_api_success_messages_do_not_claim_payment(self):
+        for status in ("INITIAL", "PENDING"):
+            with self.subTest(status=status):
+                attempt = self._attempt(status=status)
+                attempt.write({"last_status_message": "SUCCESS"})
+
+                response = attempt.frontend_response()
+
+                self.assertEqual(response["status"], status)
+                self.assertFalse(response["payment_completed"])
+                self.assertFalse(response["terminal_released"])
+                self.assertIn("OPay API response: SUCCESS", response["message"])
+                self.assertIn("payment is not confirmed", response["message"])
+
+    def test_expired_initial_query_stays_blocked_until_opay_cancel(self):
+        attempt = self._attempt(
+            status="PENDING",
+            expires_at=fields.Datetime.now() - timedelta(seconds=1),
+        )
+        client = Mock(spec=OPayClient)
+        client.query_payment.return_value = self._result(
+            attempt, "INITIAL", **{OPayClient.RESPONSE_MESSAGE_KEY: "SUCCESS"}
+        )
+
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            initial = attempt.query_opay_status(notify=False)
+            client.query_payment.return_value = self._result(attempt, "CANCEL")
+            cancelled = attempt.query_opay_status(notify=False)
+
+        self.assertEqual(initial["status"], "INITIAL")
+        self.assertFalse(initial["terminal_released"])
+        self.assertIn("expiry has passed", initial["message"])
+        self.assertIn("payment is not confirmed", initial["message"])
+        self.assertEqual(cancelled["status"], "CANCEL")
+        self.assertTrue(cancelled["terminal_released"])
+        self.assertFalse(cancelled["payment_completed"])
+        self.assertTrue(attempt.finalized_at)
+        self.assertEqual(client.query_payment.call_count, 2)
+        client.create_payment.assert_not_called()
 
     def test_webhook_rejects_invalid_signature_and_expired_timestamp(self):
         attempt = self._attempt()
@@ -716,12 +788,17 @@ class TestOPayPaymentAttempt(TransactionCase):
         self.assertIn("status=PENDING", finalization_log)
         self.assertIn("duration_ms=10", finalization_log)
 
-    def test_expiry_does_not_query_or_release_terminal(self):
+    def test_expiry_does_not_query_and_verified_pending_can_be_replaced(self):
         stale_attempt = self._attempt(
+            status="PENDING",
             expires_at=fields.Datetime.now() - timedelta(seconds=1)
         )
         new_reference = str(uuid4())
         client = Mock(spec=OPayClient)
+        client.create_payment.return_value = OPayCreatePaymentResult(
+            out_order_no=new_reference.replace("-", "").upper(),
+            order_no="OPAY-NEW-ORDER",
+        )
 
         with patch.object(
             OPayClient, "from_payment_method", return_value=client
@@ -734,12 +811,13 @@ class TestOPayPaymentAttempt(TransactionCase):
                 }
             )
 
-        self.assertEqual(stale_attempt.status, "waiting")
-        self.assertEqual(response["status"], "terminal_blocked")
-        self.assertIn("Check Previous Payment", response["message"])
-        client_factory.assert_not_called()
+        self.assertEqual(stale_attempt.status, "PENDING")
+        self.assertEqual(response["status"], "waiting")
+        self.assertTrue(stale_attempt.needs_reconciliation)
+        self.assertEqual(stale_attempt.replaced_by_attempt_id.payment_reference, new_reference)
+        client_factory.assert_called_once()
         client.query_payment.assert_not_called()
-        client.create_payment.assert_not_called()
+        client.create_payment.assert_called_once()
 
     def test_expired_uncertain_duplicate_does_not_query_or_create(self):
         attempt = self._attempt(
@@ -818,6 +896,29 @@ class TestOPayPaymentAttempt(TransactionCase):
             self.assertFalse(response["payment_completed"])
         self.assertEqual(previous.status, "PENDING")
         self.assertFalse(previous.finalized_at)
+        client.create_payment.assert_not_called()
+
+    def test_previous_initial_stays_blocked_until_query_returns_cancel(self):
+        previous = self._attempt(status="PENDING")
+        request = {"reference": str(uuid4()), "session_id": self.session.id}
+        client = Mock(spec=OPayClient)
+        client.query_payment.side_effect = [
+            self._result(previous, "INITIAL"),
+            self._result(previous, "CANCEL"),
+            OPayOrderNotFoundError("50002", "order not exist"),
+        ]
+
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            initial = self.payment_method.opay_check_previous_payment(request)
+            cancelled = self.payment_method.opay_check_previous_payment(request)
+
+        self.assertEqual(initial["status"], "terminal_blocked")
+        self.assertEqual(initial["previous_payment"]["status"], "INITIAL")
+        self.assertEqual(cancelled["status"], "terminal_available")
+        self.assertEqual(cancelled["previous_payment"]["status"], "CANCEL")
+        self.assertEqual(previous.status, "CANCEL")
+        self.assertTrue(previous.finalized_at)
+        self.assertEqual(client.query_payment.call_count, 3)
         client.create_payment.assert_not_called()
 
     def test_previous_confirmed_absent_releases_only_original_attempt(self):
@@ -911,6 +1012,130 @@ class TestOPayPaymentAttempt(TransactionCase):
             })
         recover.assert_called_once()
         self.assertFalse(response["safe_to_retry"])
+
+    def test_new_create_keeps_previous_pending_for_explicit_cashier_review(self):
+        previous = self._attempt(status="PENDING")
+        reference = str(uuid4())
+        client = Mock(spec=OPayClient)
+        client.create_payment.return_value = OPayCreatePaymentResult(
+            out_order_no=reference.replace("-", "").upper(),
+            order_no="OPAY-REPLACEMENT",
+        )
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            response = self.payment_method.opay_create_payment_request({
+                "reference": reference, "amount": 100, "session_id": self.session.id,
+            })
+        self.assertEqual(response["status"], "waiting")
+        self.assertEqual(previous.status, "PENDING")
+        self.assertTrue(previous.needs_reconciliation)
+        self.assertEqual(previous.replaced_by_attempt_id.payment_reference, reference)
+        client.query_payment.assert_not_called()
+
+        listed = self.payment_method.opay_list_payments_to_review({
+            "session_id": self.session.id,
+        })
+        self.assertIn(previous.id, [item["id"] for item in listed])
+        self.assertFalse(any("opay_client_auth_key" in item for item in listed))
+        client.query_payment.return_value = self._result(previous, "CANCEL")
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            checked = self.payment_method.opay_check_payment_to_review({
+                "session_id": self.session.id, "attempt_id": previous.id,
+            })
+        self.assertEqual(checked["status"], "CANCEL")
+        self.assertFalse(previous.needs_reconciliation)
+        self.assertEqual(previous.replaced_by_attempt_id.payment_reference, reference)
+        self.assertFalse(checked["payment_completed"])
+        self.assertEqual(
+            self.payment_method.opay_latest_out_order_no,
+            reference.replace("-", "").upper(),
+        )
+        client.create_payment.assert_called_once()
+
+    def test_initial_can_be_replaced_but_uncertain_create_still_blocks(self):
+        previous = self._attempt(status="INITIAL")
+        reference = str(uuid4())
+        client = Mock(spec=OPayClient)
+        client.create_payment.return_value = OPayCreatePaymentResult(
+            out_order_no=reference.replace("-", "").upper(),
+            order_no="OPAY-AFTER-INITIAL",
+        )
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            accepted = self.payment_method.opay_create_payment_request({
+                "reference": reference, "amount": 100, "session_id": self.session.id,
+            })
+        self.assertEqual(accepted["status"], "waiting")
+        self.assertEqual(previous.status, "INITIAL")
+        self.assertTrue(previous.needs_reconciliation)
+        client.query_payment.assert_not_called()
+
+        self.env["pos.opay.payment.attempt"].search([
+            ("payment_reference", "=", reference),
+        ]).write({"status": "CLOSE"})
+        uncertain = self._attempt(status="uncertain")
+        with patch.object(OPayClient, "from_payment_method") as factory:
+            blocked = self.payment_method.opay_create_payment_request({
+                "reference": str(uuid4()), "amount": 100,
+                "session_id": self.session.id,
+            })
+        self.assertEqual(blocked["status"], "terminal_blocked")
+        self.assertEqual(uncertain.status, "uncertain")
+        factory.assert_not_called()
+
+    def test_late_success_on_replaced_payment_requires_reconciliation(self):
+        previous = self._attempt(status="INITIAL")
+        replacement = self._attempt(status="waiting")
+        previous.write({
+            "replaced_by_attempt_id": replacement.id,
+            "replaced_at": fields.Datetime.now(),
+            "needs_reconciliation": True,
+        })
+        client = Mock(spec=OPayClient)
+        client.query_payment.return_value = self._result(previous, "SUCCESS")
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            response = self.payment_method.opay_check_payment_to_review({
+                "session_id": self.session.id, "attempt_id": previous.id,
+            })
+        self.assertEqual(response["status"], "SUCCESS")
+        self.assertTrue(previous.needs_reconciliation)
+        self.assertEqual(replacement.status, "waiting")
+        self.assertIn("earlier sale", response["message"])
+        self.assertIn(previous.id, [item["id"] for item in
+            self.payment_method.opay_list_payments_to_review({"session_id": self.session.id})])
+
+    def test_cashier_review_is_scoped_to_current_pos_and_never_writes_directly(self):
+        previous = self._attempt(status="PENDING")
+        other_config = self.env["pos.config"].create({
+            "name": "Other OPay review till",
+            "payment_method_ids": [(6, 0, [self.payment_method.id])],
+        })
+        other = self._attempt(status="PENDING")
+        other.pos_config_id = other_config
+        cashier = self.env["res.users"].create({
+            "name": "OPay review cashier", "login": "opay-review-cashier",
+            "groups_id": [(6, 0, [self.env.ref("point_of_sale.group_pos_user").id])],
+            "company_id": self.env.company.id,
+            "company_ids": [(6, 0, [self.env.company.id])],
+        })
+        method = self.payment_method.with_user(cashier)
+        listed = method.opay_list_payments_to_review({"session_id": self.session.id})
+        self.assertIn(previous.id, [item["id"] for item in listed])
+        self.assertNotIn(other.id, [item["id"] for item in listed])
+        with patch.object(OPayClient, "from_payment_method") as factory:
+            with self.assertRaises(UserError):
+                method.opay_check_payment_to_review({
+                    "session_id": self.session.id, "attempt_id": other.id,
+                })
+        factory.assert_not_called()
+        client = Mock(spec=OPayClient)
+        client.query_payment.return_value = self._result(previous, "CANCEL")
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            checked = method.opay_check_payment_to_review({
+                "session_id": self.session.id, "attempt_id": previous.id,
+            })
+        self.assertEqual(checked["status"], "CANCEL")
+        self.assertFalse(checked["payment_completed"])
+        with self.assertRaises(AccessError):
+            previous.with_user(cashier).write({"status": "CANCEL"})
 
     def _attempt(self, status="waiting", expires_at=None):
         reference = str(uuid4())

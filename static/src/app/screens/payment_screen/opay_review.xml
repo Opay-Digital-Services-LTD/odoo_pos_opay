@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates id="template" xml:space="preserve">
+    <t t-inherit="point_of_sale.PaymentScreenMethods" t-inherit-mode="extension">
+        <xpath expr="//div[contains(@class, 'paymentmethods-container')]" position="after">
+            <div t-if="this.opayPaymentMethods.length" class="o_pos_opay_review p-1">
+                <button type="button" class="btn btn-outline-secondary w-100"
+                    t-on-click="() => this.toggleOpayReview()">
+                    <i class="fa fa-list-alt me-2" role="img"/>
+                    Review earlier OPay payments
+                </button>
+                <div t-if="this.opayReview.open" class="bg-white border rounded p-2 mt-2 overflow-auto" style="max-height: 20rem;">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span class="fw-bold">Payments needing a status check</span>
+                        <button type="button" class="btn btn-sm btn-outline-secondary"
+                            t-att-disabled="this.opayReview.loading"
+                            t-on-click="() => this.loadOpayPaymentsToReview()">Refresh list</button>
+                    </div>
+                    <div t-if="this.opayReview.loading" class="text-muted">Loading payments...</div>
+                    <div t-elif="!this.opayReview.payments.length" class="text-muted">No earlier OPay payments need review at this till.</div>
+                    <div t-foreach="this.opayReview.payments" t-as="payment" t-key="payment.id"
+                        class="border-top py-2">
+                        <div class="fw-bold"><t t-esc="payment.methodName"/> — <t t-esc="payment.amount"/> <t t-esc="payment.currency"/></div>
+                        <div class="small text-muted">Reference ending <t t-esc="payment.out_order_no.slice(-8)"/> · <t t-esc="payment.status"/></div>
+                        <div t-if="payment.status === 'SUCCESS'" class="small text-danger">
+                            An earlier payment succeeded. Review its sale before charging again.
+                        </div>
+                        <button t-if="payment.status !== 'SUCCESS'" type="button"
+                            class="btn btn-sm btn-secondary mt-1"
+                            t-att-disabled="this.opayReview.checking !== null"
+                            t-on-click="() => this.checkOpayPaymentToReview(payment)">
+                            <t t-if="this.opayReview.checking === payment.id">Checking...</t>
+                            <t t-else="">Check Payment Status</t>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </xpath>
+    </t>
+</templates>

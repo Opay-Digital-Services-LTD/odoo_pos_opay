@@ -9,12 +9,13 @@ import "@pos_opay/app/screens/payment_screen/payment_screen";
 function fixture() {
     const lines = [];
     const calls = [];
+    const notices = [];
     let response;
     const method = { id: 7, use_payment_terminal: "opay" };
     const pos = {
         env: {},
         session: { id: 12 },
-        notification: { add() {} },
+        notification: { add(message, options) { notices.push({ message, options }); } },
         models: { "pos.order": { getAll: () => [{ payment_ids: lines }] } },
         data: {
             async silentCall(model, name, args) {
@@ -40,8 +41,19 @@ function fixture() {
         lines.push(value);
         return value;
     }
-    return { terminal, line, calls, setResponse: (value) => { response = value; } };
+    return { terminal, line, calls, notices, pos, setResponse: (value) => { response = value; } };
 }
+
+test("OPay POS toasts use a twelve-second delay", () => {
+    const h = fixture();
+    h.terminal._showStatus("Payment needs review", "warning");
+    expect(h.notices[0].options.autocloseDelay).toBe(12000);
+    const notices = [];
+    PaymentScreen.prototype.sendForceDone.call({
+        notification: { add(message, options) { notices.push({ message, options }); } },
+    }, { payment_method_id: { use_payment_terminal: "opay" } });
+    expect(notices[0].options.autocloseDelay).toBe(12000);
+});
 
 test("blocked Create exposes previous-payment recovery without querying automatically", async () => {
     const h = fixture();
@@ -236,92 +248,140 @@ test("non-OPay checkout exceptions retain native handling", async () => {
     expect(current.payment_status).toBe("waiting");
 });
 
-test("previous SUCCESS updates only original line; current sale remains unpaid", async () => {
-    const h = fixture();
-    const current = h.line("current");
-    const previous = h.line("previous", "waitingCard");
-    h.setResponse({
-        status: "terminal_available", reference: current.uuid, payment_completed: false,
-        previous_payment: {
-            reference: previous.uuid, status: "SUCCESS", payment_completed: true,
-            pos_session_id: 12, payment_method_id: 7,
-        },
-    });
-    await h.terminal.checkPaymentStatus(current.uuid);
-    expect(current.payment_status).toBe("retry");
-    expect(previous.payment_status).toBe("done");
-    expect(current.transaction_id).toBe(undefined);
-    expect(h.calls.map((call) => call.name)).toEqual(["opay_check_previous_payment"]);
-    expect(h.calls[0].args).toEqual([[7], { reference: "current", session_id: 12 }]);
-});
-
-test("previous result from another session cannot complete a local line", async () => {
-    const h = fixture();
-    const current = h.line("current");
-    const previous = h.line("previous", "waitingCard");
-    h.setResponse({
-        status: "terminal_available", reference: current.uuid, payment_completed: false,
-        previous_payment: {
-            reference: previous.uuid, status: "SUCCESS", payment_completed: true,
-            pos_session_id: 99, payment_method_id: 7,
-        },
-    });
-    await h.terminal.checkPaymentStatus(current.uuid);
-    expect(previous.payment_status).toBe("waitingCard");
-    expect(current.payment_status).toBe("retry");
-});
-
-test("pending previous payment remains blocked and rapid clicks are deduplicated", async () => {
-    const h = fixture();
-    const current = h.line("current");
-    let finish;
-    h.setResponse(() => new Promise((resolve) => { finish = resolve; }));
-    const first = h.terminal.checkPaymentStatus(current.uuid);
-    expect(await h.terminal.checkPaymentStatus(current.uuid)).toBe(false);
-    finish({ status: "terminal_blocked", reference: current.uuid, payment_completed: false });
-    await first;
-    expect(await h.terminal.checkPaymentStatus(current.uuid)).toBe(false);
-    expect(current.uiState.opayTerminalBlocked).toBe(true);
-    expect(h.calls.length).toBe(1);
-});
-
-test("previous Query network failure preserves blocked state and never creates", async () => {
+test("retry-line status check resolves only that line, never a previous order", async () => {
     const h = fixture();
     const current = h.line("current");
     current.uiState.opayTerminalBlocked = true;
-    h.setResponse(() => { throw new Error("offline"); });
-    expect(await h.terminal.checkPaymentStatus(current.uuid)).toBe(false);
-    expect(current.uiState.opayTerminalBlocked).toBe(true);
+    h.setResponse({
+        status: "not_found", reference: current.uuid, payment_completed: false,
+        out_order_no: "CURRENT", safe_to_retry: true, terminal_released: true,
+    });
+    await h.terminal.checkPaymentStatus(current.uuid);
     expect(current.payment_status).toBe("retry");
-    expect(h.calls.map((call) => call.name)).toEqual(["opay_check_previous_payment"]);
+    expect(getOpayUiState(current).opayTerminalBlocked).toBe(false);
+    expect(getOpayUiState(current).opayRetrySafe).toBe(true);
+    expect(h.calls.map((call) => call.name)).toEqual(["opay_resolve_create_outcome"]);
 });
 
-test("negative previous finals release only the previous line without automatic Create", async () => {
-    for (const status of ["FAIL", "CLOSE", "CANCEL", "failed"]) {
-        const h = fixture();
-        const current = h.line("current");
-        current.uiState.opayTerminalBlocked = true;
-        const previous = h.line("previous", "waitingCard");
-        h.setResponse({
-            status: "terminal_available", reference: current.uuid, payment_completed: false,
-            previous_payment: {
-                reference: previous.uuid, status, payment_completed: false,
-                pos_session_id: 12, payment_method_id: 7,
-            },
-        });
-        await h.terminal.checkPaymentStatus(current.uuid);
-        expect(current.uiState.opayTerminalBlocked).toBe(false);
-        expect(current.payment_status).toBe("retry");
-        expect(previous.payment_status).toBe("retry");
-        expect(h.calls.map((call) => call.name)).toEqual(["opay_check_previous_payment"]);
-    }
-});
-
-test("old retry line with its own uncertain payment returns to waiting, not safe retry", async () => {
+test("retry-line uncertainty remains unresolved without automatic Create", async () => {
     const h = fixture();
     const current = h.line("current");
     h.setResponse({ status: "uncertain", reference: current.uuid, payment_completed: false });
     await h.terminal.checkPaymentStatus(current.uuid);
     expect(current.payment_status).toBe("waitingCard");
-    expect(h.calls.map((call) => call.name)).toEqual(["opay_check_previous_payment"]);
+    expect(h.calls.map((call) => call.name)).toEqual(["opay_resolve_create_outcome"]);
+});
+
+test("review list is cashier initiated and does not query OPay automatically", async () => {
+    const h = fixture();
+    const screen = {
+        opayReview: { open: false, loading: false, checking: null, payments: [] },
+        opayPaymentMethods: [{ id: 7, name: "OPay" }],
+        pos: h.pos,
+        notification: { add() {} },
+        loadOpayPaymentsToReview: PaymentScreen.prototype.loadOpayPaymentsToReview,
+    };
+    expect(h.calls.length).toBe(0);
+    h.setResponse([{ id: 42, payment_method_id: 7, status: "PENDING",
+        amount: "10.00", currency: "NGN", out_order_no: "OLD-REFERENCE" }]);
+    await PaymentScreen.prototype.toggleOpayReview.call({
+        ...screen, toggleOpayReview: PaymentScreen.prototype.toggleOpayReview,
+    });
+    // The only call lists local records; it does not invoke Query Order.
+    expect(h.calls.map((call) => call.name)).toEqual(["opay_list_payments_to_review"]);
+    expect(screen.opayReview.payments.length).toBe(1);
+});
+
+test("reviewing an older CANCEL updates only its exact payment line", async () => {
+    const h = fixture();
+    const current = h.line("current", "waitingCard");
+    const previous = h.line("previous", "waitingCard");
+    const notices = [];
+    let reloads = 0;
+    const screen = {
+        opayReview: { checking: null },
+        opayPaymentMethods: [{ id: 7, name: "OPay", payment_terminal: h.terminal }],
+        pos: h.pos,
+        notification: { add(message) { notices.push(message); } },
+        async loadOpayPaymentsToReview() { reloads++; },
+    };
+    const summary = { id: 42, payment_method_id: 7, out_order_no: "OLD" };
+    h.setResponse({
+        status: "CANCEL", reference: previous.uuid, out_order_no: "OLD",
+        payment_completed: false, terminal_released: true,
+        pos_session_id: 12, payment_method_id: 7, message: "The earlier payment was cancelled.",
+    });
+    await PaymentScreen.prototype.checkOpayPaymentToReview.call(screen, summary);
+    expect(h.calls.map((call) => call.name)).toEqual(["opay_check_payment_to_review"]);
+    expect(previous.payment_status).toBe("retry");
+    expect(current.payment_status).toBe("waitingCard");
+    expect(reloads).toBe(1);
+    expect(notices.length).toBe(1);
+});
+
+test("reviewed SUCCESS from another session cannot pay the current sale", async () => {
+    const h = fixture();
+    const current = h.line("current", "waitingCard");
+    const previous = h.line("previous", "waitingCard");
+    const screen = {
+        opayReview: { checking: null },
+        opayPaymentMethods: [{ id: 7, name: "OPay", payment_terminal: h.terminal }],
+        pos: h.pos,
+        notification: { add() {} },
+        async loadOpayPaymentsToReview() {},
+    };
+    h.setResponse({
+        status: "SUCCESS", reference: previous.uuid, out_order_no: "OLD",
+        payment_completed: true, pos_session_id: 99, payment_method_id: 7,
+        message: "Review the earlier sale.",
+    });
+    await PaymentScreen.prototype.checkOpayPaymentToReview.call(
+        screen, { id: 42, payment_method_id: 7, out_order_no: "OLD" }
+    );
+    expect(current.payment_status).toBe("waitingCard");
+    expect(previous.payment_status).toBe("waitingCard");
+});
+
+test("reviewed SUCCESS in this session completes only its original line", async () => {
+    const h = fixture();
+    const current = h.line("current", "waitingCard");
+    const previous = h.line("previous", "waitingCard");
+    const screen = {
+        opayReview: { checking: null },
+        opayPaymentMethods: [{ id: 7, name: "OPay", payment_terminal: h.terminal }],
+        pos: h.pos,
+        notification: { add() {} },
+        async loadOpayPaymentsToReview() {},
+    };
+    h.setResponse({
+        status: "SUCCESS", reference: previous.uuid, out_order_no: "OLD",
+        payment_completed: true, pos_session_id: 12, payment_method_id: 7,
+        message: "Review the earlier sale.",
+    });
+    await PaymentScreen.prototype.checkOpayPaymentToReview.call(
+        screen, { id: 42, payment_method_id: 7, out_order_no: "OLD" }
+    );
+    expect(previous.payment_status).toBe("done");
+    expect(current.payment_status).toBe("waitingCard");
+    expect(h.calls.map((call) => call.name)).toEqual(["opay_check_payment_to_review"]);
+});
+
+test("failed review does not fabricate a final status or create a payment", async () => {
+    const h = fixture();
+    const current = h.line("current", "waitingCard");
+    const notices = [];
+    const screen = {
+        opayReview: { checking: null },
+        opayPaymentMethods: [{ id: 7, name: "OPay", payment_terminal: h.terminal }],
+        pos: h.pos,
+        notification: { add(message) { notices.push(message); } },
+        async loadOpayPaymentsToReview() { throw new Error("must not reload"); },
+    };
+    h.setResponse(() => { throw new Error("offline"); });
+    await PaymentScreen.prototype.checkOpayPaymentToReview.call(
+        screen, { id: 42, payment_method_id: 7, out_order_no: "OLD" }
+    );
+    expect(current.payment_status).toBe("waitingCard");
+    expect(h.calls.map((call) => call.name)).toEqual(["opay_check_payment_to_review"]);
+    expect(notices.length).toBe(1);
 });

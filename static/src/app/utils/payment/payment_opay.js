@@ -2,7 +2,9 @@ import { _t } from "@web/core/l10n/translation";
 import { PaymentInterface } from "@point_of_sale/app/payment/payment_interface";
 import { register_payment_method } from "@point_of_sale/app/store/pos_store";
 
-const WAITING_STATUSES = new Set(["waiting", "uncertain", "PENDING"]);
+export const OPAY_NOTIFICATION_DELAY_MS = 12_000;
+
+const WAITING_STATUSES = new Set(["waiting", "uncertain", "INITIAL", "PENDING"]);
 const FAILED_STATUSES = new Set([
     "failed",
     "not_found",
@@ -85,8 +87,8 @@ export class PaymentOpay extends PaymentInterface {
             paymentLine.set_payment_status("waitingCard");
             this._showStatus(
                 _t(
-                    "The OPay payment could not be verified. Do not start another " +
-                        "OPay payment until the current attempt is resolved."
+                    "The OPay payment could not be verified. Check this sale's " +
+                        "payment status before trying it again."
                 ),
                 "warning"
             );
@@ -253,13 +255,10 @@ export class PaymentOpay extends PaymentInterface {
         if (!paymentLine) {
             return false;
         }
-        if (paymentLine.get_payment_status() === "retry") {
-            return this._checkPreviousPayment(paymentLine);
-        }
         // A lost Create RPC may leave the browser without OPay references.
         // Manual recovery reconstructs/correlates them on the server; it never
         // issues another Create Payment request.
-        const response = paymentLine.payment_ref_no
+        const response = paymentLine.payment_ref_no && paymentLine.get_payment_status() !== "retry"
             ? await this.recoverPayment(uuid)
             : await this.resolveCreateOutcome(uuid);
         if (!response || response.status === "uncertain") {
@@ -319,6 +318,9 @@ export class PaymentOpay extends PaymentInterface {
             return false;
         }
         this._storeReferences(paymentLine, response);
+        if (response.status !== "terminal_blocked") {
+            setTerminalBlocked(paymentLine, false);
+        }
 
         // Backend finalization is authoritative and first-final-wins.  Keep the
         // browser equally defensive if a delayed/conflicting event arrives.
@@ -420,6 +422,7 @@ export class PaymentOpay extends PaymentInterface {
         this.pos.notification.add(message, {
             title: _t("OPay Payment"),
             type,
+            autocloseDelay: OPAY_NOTIFICATION_DELAY_MS,
         });
     }
 

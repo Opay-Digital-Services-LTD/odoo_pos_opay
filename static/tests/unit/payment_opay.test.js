@@ -310,7 +310,7 @@ test("cancel refuses unresolved states without Query and protects SUCCESS", asyn
     const harness = makeOpayHarness();
     const line = harness.addPaymentLine();
     const terminal = harness.paymentMethod.payment_terminal;
-    for (const status of ["waiting", "PENDING", "uncertain"]) {
+    for (const status of ["waiting", "INITIAL", "PENDING", "uncertain"]) {
         line.set_payment_status("waitingCancel");
         expect(await terminal.send_payment_cancel(harness.order, line.uuid)).toBe(false);
         expect(line.get_payment_status()).toBe("waitingCard");

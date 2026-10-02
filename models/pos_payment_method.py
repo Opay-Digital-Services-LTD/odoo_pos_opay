@@ -33,7 +33,7 @@ class PosPaymentMethod(models.Model):
         "opay_latest_amount",
         "opay_latest_status",
     }
-    _OPAY_ACTIVE_STATUSES = {"creating", "waiting", "uncertain"}
+    _OPAY_ACTIVE_STATUSES = {"creating", "waiting", "uncertain", "INITIAL", "PENDING"}
 
     def _get_payment_terminal_selection(self):
         return super()._get_payment_terminal_selection() + [
@@ -326,32 +326,24 @@ class PosPaymentMethod(models.Model):
         active_attempt = attempt_model.search(
             [
                 ("payment_method_id", "=", self.id),
-                ("status", "in", list(attempt_model.ACTIVE_STATUSES)),
+                # PENDING/INITIAL are authenticated, unprocessed provider
+                # statuses. A new accepted Create replaces them on this SN.
+                ("status", "in", ["creating", "waiting", "uncertain"]),
+                ("replaced_by_attempt_id", "=", False),
             ],
             limit=1,
         )
         if active_attempt:
-            if active_attempt.status == "SUCCESS":
-                return self._opay_failed_response(
-                    reference,
-                    out_order_no,
-                    _(
-                        "A previous OPay payment was confirmed successful. Resolve "
-                        "that payment before starting another attempt."
-                    ),
-                )
-            if active_attempt.is_active():
-                response = self._opay_failed_response(
-                    reference,
-                    out_order_no,
-                    _(
-                        "The configured OPay terminal already has a payment awaiting "
-                        "confirmation. Use Check Previous Payment before creating "
-                        "another payment."
-                    ),
-                )
-                response["status"] = "terminal_blocked"
-                return response
+            response = self._opay_failed_response(
+                reference,
+                out_order_no,
+                _(
+                    "An earlier OPay request needs a status check before this "
+                    "terminal can receive another. Use Review OPay Payments."
+                ),
+            )
+            response["status"] = "terminal_blocked"
+            return response
 
         attempt = attempt_model.create(
             attempt_model._new_attempt_values(
@@ -467,7 +459,7 @@ class PosPaymentMethod(models.Model):
                 message=attempt._append_opay_message(
                     _(
                         "OPay may have received this payment request. Its status "
-                        "must be checked before another payment is created."
+                        "must be checked before retrying this sale."
                     ),
                     error.opay_message,
                     verified=False,
@@ -489,13 +481,14 @@ class PosPaymentMethod(models.Model):
                 "opay_latest_status": "waiting",
             }
         )
+        previous_attempts = configured_method._opay_mark_prior_attempts_replaced(attempt)
         configured_method._opay_log_create_api(
             attempt,
             outcome="accepted",
             started_at=started_at,
             level=logging.INFO,
         )
-        return attempt.frontend_response(
+        response = attempt.frontend_response(
             message=attempt._append_opay_message(
                 _(
                     "OPay accepted the payment request. Waiting for customer payment."
@@ -503,6 +496,94 @@ class PosPaymentMethod(models.Model):
                 result.message,
             )
         )
+        if previous_attempts:
+            response["message"] += " " + _(
+                "Use Review OPay Payments to confirm the earlier payment's final "
+                "status before closing that sale. It was not counted toward this sale."
+            )
+        return response
+
+    def _opay_mark_prior_attempts_replaced(self, current_attempt):
+        """Record the first known replacement without finalizing older orders."""
+        self.ensure_one()
+        attempts = self.env["pos.opay.payment.attempt"].sudo().search([
+            ("payment_method_id", "=", self.id),
+            ("id", "<", current_attempt.id),
+            ("status", "in", list(self._OPAY_ACTIVE_STATUSES)),
+            ("replaced_by_attempt_id", "=", False),
+        ])
+        if attempts:
+            attempts.write({
+                "replaced_by_attempt_id": current_attempt.id,
+                "replaced_at": fields.Datetime.now(),
+                "needs_reconciliation": True,
+            })
+        return attempts
+
+    def opay_list_payments_to_review(self, request):
+        """Cashier-safe summaries; no OPay credentials or private model access."""
+        self.ensure_one()
+        self._opay_check_pos_user()
+        if self.use_payment_terminal != "opay" or not isinstance(request, dict) or set(request) != {"session_id"}:
+            raise UserError(_("Invalid OPay payment review request."))
+        session = self._opay_validate_session(request["session_id"])
+        attempts = self.env["pos.opay.payment.attempt"].sudo().search(
+            [
+                ("payment_method_id", "=", self.id),
+                ("pos_config_id", "=", session.config_id.id),
+                "|",
+                ("status", "in", list(self._OPAY_ACTIVE_STATUSES)),
+                ("needs_reconciliation", "=", True),
+            ],
+            order="id desc",
+            limit=50,
+        )
+        return [
+            {
+                "id": attempt.id,
+                "payment_method_id": self.id,
+                "status": attempt.status,
+                "amount": attempt.amount,
+                "currency": attempt.currency,
+                "out_order_no": attempt.out_order_no,
+                "created_at": fields.Datetime.to_string(attempt.create_date),
+                "needs_reconciliation": attempt.needs_reconciliation,
+            }
+            for attempt in attempts
+        ]
+
+    def opay_check_payment_to_review(self, request):
+        """Explicitly query one historical payment at this cashier's POS."""
+        self.ensure_one()
+        self._opay_check_pos_user()
+        if self.use_payment_terminal != "opay" or not isinstance(request, dict) or set(request) != {"session_id", "attempt_id"}:
+            raise UserError(_("Invalid OPay payment review request."))
+        session = self._opay_validate_session(request["session_id"])
+        attempt_id = request["attempt_id"]
+        if isinstance(attempt_id, bool) or not isinstance(attempt_id, int):
+            raise UserError(_("Invalid OPay payment review request."))
+        self.env.cr.execute(
+            "SELECT id FROM pos_payment_method WHERE id = %s FOR UPDATE",
+            [self.id],
+        )
+        attempt = self.env["pos.opay.payment.attempt"].sudo().browse(attempt_id).exists()
+        if not attempt or (
+            attempt.payment_method_id != self.sudo()
+            or attempt.pos_config_id != session.config_id
+            or attempt.company_id != session.company_id
+        ):
+            raise UserError(_("This OPay payment is not available at this Point of Sale."))
+        response = (
+            attempt.query_opay_status(reason="manual_cashier_review")
+            if attempt.is_active()
+            else attempt.frontend_response(reused=True)
+        )
+        return {
+            **response,
+            "payment_method_id": self.id,
+            "pos_session_id": attempt.pos_session_id.id,
+            "needs_reconciliation": attempt.needs_reconciliation,
+        }
 
     def opay_get_payment_status(self, request):
         """Return/query the exact stored attempt identified by the payment UUID."""
@@ -739,6 +820,7 @@ class PosPaymentMethod(models.Model):
         final_negative = opay_status in {"FAIL", "CLOSE", "CANCEL"}
         frontend_status = "uncertain" if opay_status == "SUCCESS" else opay_status
         messages = {
+            "INITIAL": _("The recovered OPay payment is awaiting processing."),
             "PENDING": _("The recovered OPay payment is still pending."),
             "SUCCESS": _(
                 "OPay confirmed this payment order, but Odoo's local attempt "
@@ -808,7 +890,7 @@ class PosPaymentMethod(models.Model):
             raise OPayMalformedResponseError(
                 "OPay Query Order did not return an order number."
             )
-        status = status.strip() if isinstance(status, str) else status
+        status = status.strip().upper() if isinstance(status, str) else status
         if status not in self.env["pos.opay.payment.attempt"].OPAY_STATUSES:
             raise OPayMalformedResponseError(
                 "OPay Query Order returned an invalid payment status."

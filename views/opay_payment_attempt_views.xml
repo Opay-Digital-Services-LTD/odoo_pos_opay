@@ -20,6 +20,8 @@
                 <field name="last_source" string="Source" optional="show"/>
                 <field name="expires_at" optional="hide"/>
                 <field name="finalized_at" optional="hide"/>
+                <field name="needs_reconciliation" string="Needs Review" optional="show"/>
+                <field name="replaced_at" string="Replaced At" optional="hide"/>
             </list>
         </field>
     </record>
@@ -37,7 +39,7 @@
                         class="oe_highlight"
                         icon="fa-refresh"
                         groups="base.group_erp_manager"
-                        invisible="status not in ['creating', 'waiting', 'uncertain', 'PENDING']"
+                        invisible="status not in ['creating', 'waiting', 'uncertain', 'INITIAL', 'PENDING']"
                     />
                 </header>
                 <sheet>
@@ -66,6 +68,9 @@
                             <field name="create_date" string="Created"/>
                             <field name="expires_at"/>
                             <field name="finalized_at"/>
+                            <field name="replaced_at"/>
+                            <field name="replaced_by_attempt_id" options="{'no_open': True}"/>
+                            <field name="needs_reconciliation" string="Needs Review"/>
                         </group>
                     </group>
                 </sheet>
@@ -83,7 +88,8 @@
                 <field name="order_no"/>
                 <field name="payment_method_id"/>
                 <field name="terminal_sn"/>
-                <filter name="active" string="Active" domain="[('status', 'in', ['creating', 'waiting', 'uncertain', 'PENDING'])]"/>
+                <filter name="active" string="Active" domain="[('status', 'in', ['creating', 'waiting', 'uncertain', 'INITIAL', 'PENDING'])]"/>
+                <filter name="needs_reconciliation" string="Needs Review" domain="[('needs_reconciliation', '=', True)]"/>
                 <filter name="successful" string="Successful" domain="[('status', '=', 'SUCCESS')]"/>
                 <filter name="final_negative" string="Failed / Closed / Cancelled" domain="[('status', 'in', ['failed', 'FAIL', 'CLOSE', 'CANCEL'])]"/>
                 <group>

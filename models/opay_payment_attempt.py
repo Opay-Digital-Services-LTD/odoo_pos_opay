@@ -65,9 +65,9 @@ class PosOpayPaymentAttempt(models.Model):
     _rec_names_search = ["payment_reference", "out_order_no", "order_no"]
     _check_company_auto = True
 
-    ACTIVE_STATUSES = {"creating", "waiting", "uncertain", "PENDING"}
+    ACTIVE_STATUSES = {"creating", "waiting", "uncertain", "INITIAL", "PENDING"}
     FINAL_STATUSES = {"SUCCESS", "FAIL", "CLOSE", "CANCEL"}
-    OPAY_STATUSES = FINAL_STATUSES | {"PENDING"}
+    OPAY_STATUSES = FINAL_STATUSES | {"INITIAL", "PENDING"}
 
     payment_method_id = fields.Many2one(
         "pos.payment.method",
@@ -99,6 +99,7 @@ class PosOpayPaymentAttempt(models.Model):
             ("waiting", "Waiting"),
             ("uncertain", "Uncertain"),
             ("failed", "Create Failed"),
+            ("INITIAL", "Initial"),
             ("PENDING", "Pending"),
             ("SUCCESS", "Success"),
             ("FAIL", "Failed"),
@@ -115,6 +116,12 @@ class PosOpayPaymentAttempt(models.Model):
         [("create", "Create"), ("query", "Query"), ("webhook", "Webhook")]
     )
     last_status_message = fields.Char(readonly=True)
+    replaced_by_attempt_id = fields.Many2one(
+        "pos.opay.payment.attempt", readonly=True, index=True, ondelete="set null",
+        check_company=True,
+    )
+    replaced_at = fields.Datetime(readonly=True)
+    needs_reconciliation = fields.Boolean(readonly=True, default=False, index=True)
 
     _sql_constraints = [
         (
@@ -312,6 +319,7 @@ class PosOpayPaymentAttempt(models.Model):
                 "last_source": "query",
                 "last_status_message": self._safe_message(error.opay_message),
                 "finalized_at": fields.Datetime.now(),
+                "needs_reconciliation": False,
             }
         )
         self.payment_method_id._opay_clear_latest_attempt(self)
@@ -450,7 +458,10 @@ class PosOpayPaymentAttempt(models.Model):
         }
         if incoming_status in self.FINAL_STATUSES:
             write_values["finalized_at"] = fields.Datetime.now()
+            if incoming_status != "SUCCESS":
+                write_values["needs_reconciliation"] = False
         self.write(write_values)
+        self.payment_method_id._opay_mark_prior_attempts_replaced(self)
 
         if incoming_status in self.FINAL_STATUSES:
             self.payment_method_id._opay_clear_latest_attempt(self)
@@ -818,24 +829,51 @@ class PosOpayPaymentAttempt(models.Model):
             "waiting": _("Waiting for customer payment on the OPay terminal."),
             "uncertain": _(
                 "OPay may have received this payment request. Its status must be "
-                "checked before another payment is created."
+                "checked before retrying this sale."
             ),
             "failed": _("OPay rejected the payment request."),
-            "PENDING": _("The OPay payment is still pending on the terminal."),
+            "INITIAL": _("OPay still reports this payment as awaiting processing."),
+            "PENDING": _("OPay still reports this payment as pending."),
             "SUCCESS": _("OPay confirmed the payment successfully."),
             "FAIL": _("OPay reported that the payment failed."),
             "CLOSE": _("The OPay payment expired or was closed."),
             "CANCEL": _("The OPay payment was cancelled by the operator."),
         }
+        if self.status in {"INITIAL", "PENDING"} and self.is_stale():
+            status_messages[self.status] = _(
+                "The requested payment expiry has passed, but OPay still reports "
+                "this order as unresolved. Check its status again later."
+            )
+        if self.replaced_by_attempt_id and self.is_active():
+            status_messages[self.status] = _(
+                "A newer request was sent to this OPay terminal. The earlier "
+                "payment is still unconfirmed; check it before closing its sale."
+            )
+        elif self.needs_reconciliation and self.status == "SUCCESS":
+            status_messages[self.status] = _(
+                "An earlier OPay payment succeeded after a newer request was sent. "
+                "Review the earlier sale to prevent a duplicate charge."
+            )
         if self.last_status_message:
             if (
                 self.status in {"FAIL", "CLOSE", "CANCEL"}
-                and self.last_status_message.strip().upper() == "SUCCESS"
+                and self.last_status_message.strip().upper() in {"SUCCESS", "SUCCESSFUL"}
             ):
                 status_messages[self.status] = _(
-                    "%(message)s OPay's status-check message was SUCCESS; "
-                    "that does not mean the payment succeeded.",
+                    "%(message)s OPay API response: %(response)s "
+                    "(the API request succeeded; the payment did not succeed).",
                     message=status_messages[self.status],
+                    response=self.last_status_message,
+                )
+            elif (
+                self.status in {"INITIAL", "PENDING"}
+                and self.last_status_message.strip().upper() in {"SUCCESS", "SUCCESSFUL"}
+            ):
+                status_messages[self.status] = _(
+                    "%(message)s OPay API response: %(response)s "
+                    "(the API request succeeded; the payment is not confirmed).",
+                    message=status_messages[self.status],
+                    response=self.last_status_message,
                 )
             else:
                 status_messages[self.status] = self._append_opay_message(
