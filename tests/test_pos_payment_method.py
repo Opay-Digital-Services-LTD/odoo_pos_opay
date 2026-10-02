@@ -608,6 +608,35 @@ class TestPosPaymentMethod(TransactionCase):
         client.query_payment.assert_called_once_with(out_order_no=self.out_order_no)
         client.create_payment.assert_not_called()
 
+    def test_missing_local_attempt_initial_remains_unresolved(self):
+        payment_method, session = self._runtime_records()
+        client = Mock(spec=OPayClient)
+        client.head_merchant_id = payment_method.opay_head_merchant_id
+        client.merchant_id = payment_method.opay_merchant_id
+        client.terminal_sn = payment_method.opay_terminal_sn
+        client.query_payment.return_value = {
+            "outOrderNo": self.out_order_no,
+            "orderNo": "OPAY-ORDER-INITIAL",
+            "status": "INITIAL",
+            "amount": "1250.00",
+            "currency": "NGN",
+            "headMerchantId": payment_method.opay_head_merchant_id,
+            "merchantId": payment_method.opay_merchant_id,
+            "sn": payment_method.opay_terminal_sn,
+        }
+
+        with patch.object(OPayClient, "from_payment_method", return_value=client):
+            result = payment_method.opay_resolve_create_outcome(
+                {"reference": self.payment_uuid, "session_id": session.id}
+            )
+
+        self.assertEqual(result["status"], "INITIAL")
+        self.assertFalse(result["safe_to_retry"])
+        self.assertFalse(result["terminal_released"])
+        self.assertFalse(result["payment_completed"])
+        client.query_payment.assert_called_once_with(out_order_no=self.out_order_no)
+        client.create_payment.assert_not_called()
+
     def test_missing_local_attempt_allows_retry_after_remote_final_negative(self):
         payment_method, session = self._runtime_records()
         client = Mock(spec=OPayClient)

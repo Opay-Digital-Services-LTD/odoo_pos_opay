@@ -207,9 +207,14 @@ While an OPay line is waiting or uncertain, the Payment screen displays
 - completes only the exact line when authenticated Query Order returns
   `SUCCESS`.
 
-`PENDING` or an uncertain/unavailable response keeps the line waiting. A Query
+`INITIAL`, `PENDING`, or an uncertain/unavailable response keeps the line waiting. A Query
 transport or authentication problem does not manufacture a failed payment and
 does not release the line for a new payment.
+
+The requested expiry time alone does not release a payment. If OPay still reports
+`INITIAL` or `PENDING` after that time or after cancellation on the device,
+the order remains unresolved until OPay confirms a final status. The cashier
+can check again; a successful API response message is not proof of payment.
 
 There is no automatic Query Order timer. The reliability order is:
 
@@ -222,7 +227,8 @@ There is no automatic Query Order timer. The reliability order is:
 | --- | --- | --- |
 | `creating` | Local attempt is being submitted | Not paid; creation is protected against duplicates |
 | `waiting` | Create Payment was accepted | Wait for webhook or Check Payment Status |
-| `uncertain` | Communication outcome is not authoritative | Remain waiting; do not create another payment |
+| `uncertain` | Communication outcome is not authoritative | Check this sale before retrying it; the terminal remains guarded until checked |
+| `INITIAL` | OPay reports the request is awaiting processing | Remain waiting |
 | `PENDING` | OPay confirms the transaction is still pending | Remain waiting |
 | `SUCCESS` | Authenticated, correlated OPay success | Complete the exact payment line |
 | `failed` | Create Payment was explicitly rejected or configuration failed | Retry behavior is allowed |
@@ -230,7 +236,17 @@ There is no automatic Query Order timer. The reliability order is:
 | `CLOSE` | OPay confirms the transaction is closed/expired | Fail/retry and release the terminal attempt |
 | `CANCEL` | OPay confirms cancellation | Fail/retry and release the terminal attempt |
 
-Clicking Cancel on an unresolved waiting, pending, or uncertain line does not
+For a different sale, a cashier may send a new request after Query Order has
+confirmed the earlier request is `PENDING` or `INITIAL`. Merchant testing shows
+that OPay cancels an unprocessed terminal request when a newer one is accepted;
+Odoo does not assume that cancellation and retains the earlier attempt until
+its own `CANCEL`, `CLOSE`, `FAIL`, or `SUCCESS` is authenticated. In the Payment
+screen, **Review earlier OPay payments** lists this till's unresolved attempts
+and lets the cashier explicitly check each one. A late `SUCCESS` stays attached
+to the earlier sale and is flagged for reconciliation; it never pays the new sale.
+An unverified `creating`, `waiting`, or `uncertain` request must be checked first.
+
+Clicking Cancel on an unresolved waiting, initial, pending, or uncertain line does not
 claim that the remote transaction was cancelled. Use Check Payment Status after
 the terminal reaches a final state. No server-side OPay cancellation endpoint is
 implemented.
@@ -272,8 +288,9 @@ order; the screen then refreshes its read-only status and timestamps.
 
 - Ask the cashier to click **Check Payment Status** after the physical terminal
   has reached a result.
-- Do not remove the line or start a second OPay payment while the result is
-  waiting, pending, or uncertain.
+- Do not retry the same sale while its OPay outcome is unknown. A different sale
+  may use the terminal after the earlier order is verified as `PENDING` or
+  `INITIAL`; use **Review earlier OPay payments** to check the old order later.
 - Query Order is deliberately not polled automatically.
 
 ### Webhook troubleshooting

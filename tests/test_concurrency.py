@@ -305,7 +305,7 @@ class TestOPayConcurrency(BaseCase):
         self.assertEqual(attempts[0]["payment_reference"], reference)
         self.assertEqual(attempts[0]["status"], "waiting")
 
-    def test_same_terminal_competing_create_calls_opay_once(self):
+    def test_same_terminal_competing_create_requires_verified_pending(self):
         first_reference = str(uuid4())
         second_reference = str(uuid4())
         release_create = threading.Event()

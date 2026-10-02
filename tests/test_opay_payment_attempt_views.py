@@ -24,6 +24,9 @@ class TestOPayPaymentAttemptViews(TransactionCase):
         "create_date",
         "expires_at",
         "finalized_at",
+        "replaced_at",
+        "replaced_by_attempt_id",
+        "needs_reconciliation",
     }
     RESTRICTED_FIELDS = {
         "head_merchant_id",

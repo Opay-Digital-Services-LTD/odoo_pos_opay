@@ -76,7 +76,7 @@
             <li>Stable payment references and duplicate Create protection.</li>
             <li>Authenticated webhook processing with exact attempt correlation.</li>
             <li>Cashier-triggered Check Payment Status using Query Order.</li>
-            <li>SUCCESS, FAIL, CLOSE, CANCEL, PENDING, and uncertain-state handling.</li>
+            <li>SUCCESS, FAIL, CLOSE, CANCEL, INITIAL, PENDING, and uncertain-state handling.</li>
             <li>Read-only operational payment-attempt records.</li>
             <li>Multi-company isolation and safe operational logging.</li>
         </ul>
@@ -154,7 +154,7 @@
             <p>
                 Query Order is not polled automatically. Final status comes from the
                 authenticated OPay webhook or an explicit cashier Check Payment Status
-                action. PENDING and uncertain outcomes remain waiting and never trigger
+                action. INITIAL, PENDING, and uncertain outcomes remain waiting and never trigger
                 a blind Create Payment retry.
             </p>
         </div>

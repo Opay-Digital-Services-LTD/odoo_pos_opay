@@ -149,6 +149,24 @@ class TestOPayClient(TransactionCase):
         with self.assertRaises(OPayConfigurationError):
             self.client.query_payment()
 
+    def test_query_preserves_initial_and_cancel_despite_api_success_message(self):
+        for status in ("INITIAL", "CANCEL"):
+            with self.subTest(status=status):
+                self._set_response({
+                    "outOrderNo": "ODOO-PAYMENT-1",
+                    "orderNo": "OPAY-ORDER-1",
+                    "status": status,
+                    "amount": "1234.50",
+                    "currency": "NGN",
+                })
+
+                result = self.client.query_payment(out_order_no="ODOO-PAYMENT-1")
+
+                self.assertEqual(result["status"], status)
+                self.assertEqual(
+                    result[OPayClient.RESPONSE_MESSAGE_KEY], "SUCCESSFUL"
+                )
+
     def test_amount_normalization_and_validation(self):
         normalized_amounts = (
             (100, "100.00"),

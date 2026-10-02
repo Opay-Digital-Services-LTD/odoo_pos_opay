@@ -785,7 +785,7 @@ test("cancellation preserves unresolved and successful states and only releases 
         throw new Error("Cancel must not query OPay");
     });
 
-    for (const status of ["waiting", "PENDING", "uncertain"]) {
+    for (const status of ["waiting", "INITIAL", "PENDING", "uncertain"]) {
         paymentLine.setPaymentStatus("waitingCard");
         terminal.handleOpayStatusResponse({
             payment_method_id: opayPaymentMethod.id,

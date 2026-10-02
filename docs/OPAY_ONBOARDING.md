@@ -213,7 +213,7 @@ for runtime API construction and are not exposed to the POS loader by this addon
 - [ ] Check Payment Status resolves the existing attempt without another Create.
 - [ ] `SUCCESS` completes only the exact correlated payment line.
 - [ ] `FAIL`, `CLOSE`, and `CANCEL` release the attempt without completing payment.
-- [ ] `PENDING` remains waiting.
+- [ ] `INITIAL` and `PENDING` remain waiting, even after the requested expiry time.
 - [ ] Odoo logs contain no credentials or key material.
 
 ## Operational references

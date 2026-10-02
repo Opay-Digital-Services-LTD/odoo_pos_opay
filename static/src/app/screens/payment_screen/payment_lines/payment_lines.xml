@@ -4,7 +4,7 @@
         <xpath expr="//t[@t-elif=&quot;line.payment_status == 'retry'&quot;]/div[1]" position="replace">
             <div class="electronic_status">
                 <t t-if="this.isOpayTerminalBlocked(line)">
-                    A previous payment needs confirmation before another request can be sent.
+                    This payment was not sent. Check its status before retrying this sale.
                 </t>
                 <t t-elif="line.payment_method_id.use_payment_terminal === 'opay'">This sale has not been paid by OPay.</t>
                 <t t-else="">Transaction cancelled</t>
@@ -63,7 +63,7 @@
             <attribute name="t-att-class">line.payment_method_id.use_payment_terminal === 'opay' ? 'fa-clock-o' : 'fa-circle-o-notch fa-spin'</attribute>
         </xpath>
         <xpath expr="//div[contains(@class, 'electronic_payment') or contains(@t-attf-class, 'electronic_payment')]" position="inside">
-            <div t-if="this.canCheckOpayStatus(line) and line.payment_status !== 'retry'" class="text-center text-muted mt-2">Payment is not confirmed. Check Payment Status before taking another payment.</div>
+            <div t-if="this.canCheckOpayStatus(line) and line.payment_status !== 'retry'" class="text-center text-muted mt-2">Payment is not confirmed. Check Payment Status before retrying this sale.</div>
             <button
                 t-if="this.canCheckOpayStatus(line) and line.payment_status !== 'retry'"
                 type="button"
